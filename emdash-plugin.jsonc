@@ -1,0 +1,88 @@
+{
+	"$schema": "./node_modules/@emdash-cms/plugin-cli/schemas/emdash-plugin.schema.json",
+
+	"slug": "ai-alt-text",
+	"name": "AI Alt Text",
+	"publisher": "did:plc:tc7kmqcnt5ad4pumbxzxduap",
+
+	"license": "MIT",
+	"author": { "name": "La Symphonie", "url": "https://lasymphonieagency.com" },
+	"security": { "email": "contact@lasymphonieagency.com" },
+	"description": "Writes alt text for images with Claude when content is saved, and lists images still missing one.",
+	"keywords": ["accessibility", "alt text", "images", "ai", "wcag"],
+	"repo": "https://github.com/DavidPivert/emdash-plugin-ai-alt-text",
+
+	"release": {
+		"artifacts": {
+			"icon": { "file": "./icon.png" }
+		}
+	},
+
+	// Trust contract — what runtime APIs the plugin asks for.
+	// Changing these between releases requires a version bump because
+	// installed users have consented to the old contract.
+	//  - content:write   — required by content:beforeSave; saves the alt text
+	//                      written from the admin page.
+	//  - content:read    — reads entries for the audit page.
+	//  - schema:read     — finds collections that have image fields.
+	//  - network:request — calls the Claude API (only api.anthropic.com).
+	"capabilities": ["content:read", "content:write", "schema:read", "network:request"],
+	"allowedHosts": ["api.anthropic.com"],
+	"storage": {
+		"alt_log": { "indexes": ["collection", "status", "at"] }
+	},
+
+	"admin": {
+		"pages": [{ "path": "/audit", "label": "Alt text", "icon": "image" }],
+		"widgets": [{ "id": "activity", "title": "AI alt text", "size": "third" }],
+		"settingsSchema": {
+			"apiKey": {
+				"type": "secret",
+				"label": "Anthropic API key",
+				"description": "From console.anthropic.com. Stored encrypted. Without it, no alt text is written."
+			},
+			"model": {
+				"type": "select",
+				"label": "Claude model",
+				"description": "Haiku is fast enough to run while content is saved. Sonnet and Opus write richer descriptions but take longer.",
+				"options": [
+					{ "value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (fast, recommended)" },
+					{ "value": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5" },
+					{ "value": "claude-opus-5-5", "label": "Claude Opus 5.5" }
+				],
+				"default": "claude-haiku-4-5"
+			},
+			"autoGenerate": {
+				"type": "boolean",
+				"label": "Write alt text when content is saved",
+				"description": "Fills images that have no alt text. A failure never blocks the save.",
+				"default": true
+			},
+			"maxPerSave": {
+				"type": "number",
+				"label": "Images per save",
+				"description": "Upper bound per save, to stay within the time allowed. The rest can be written from the Alt text page.",
+				"min": 1,
+				"max": 5,
+				"default": 3
+			},
+			"overwrite": {
+				"type": "boolean",
+				"label": "Rewrite existing alt text on save",
+				"description": "Off keeps alt text written by people.",
+				"default": false
+			},
+			"collections": {
+				"type": "string",
+				"label": "Collections",
+				"description": "Comma-separated collection slugs. Empty means every collection with an image field."
+			},
+			"siteUrl": {
+				"type": "url",
+				"label": "Public site URL",
+				"description": "Claude downloads images from this address. Leave empty to use the site URL from EmDash settings.",
+				"placeholder": "https://example.com"
+			}
+		}
+	}
+}

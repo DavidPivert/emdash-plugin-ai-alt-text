@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="56" fill="#131a2e"/>
+  <!-- Picture card -->
+  <rect x="38" y="52" width="180" height="130" rx="22" fill="#faf8f4"/>
+  <!-- Sun -->
+  <circle cx="88" cy="94" r="16" fill="#C49A4E"/>
+  <!-- Landscape as brand waves -->
+  <path d="M38 160 C66 160 74 118 104 118 C132 118 132 150 154 150 C174 150 180 128 200 128 C208 128 214 131 218 134 L218 160 C218 172 208 182 196 182 L60 182 C48 182 38 172 38 160 Z" fill="#131a2e"/>
+  <path d="M46 150 C72 150 80 128 104 128 C128 128 132 158 156 158 C178 158 184 140 210 140" fill="none" stroke="#C49A4E" stroke-width="7" stroke-linecap="round"/>
+  <!-- Alt text lines under the card -->
+  <rect x="38" y="198" width="120" height="12" rx="6" fill="#C49A4E"/>
+  <rect x="166" y="198" width="52" height="12" rx="6" fill="#faf8f4" opacity="0.55"/>
+</svg>
