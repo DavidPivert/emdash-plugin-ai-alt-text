@@ -50,7 +50,15 @@ export async function handleAdmin(input: unknown, ctx: PluginContext): Promise<{
 
 function header(settings: Settings): Block[] {
 	const blocks: Block[] = [{ type: "header", text: "AI alt text" }];
-	if (!settings.apiKey) {
+	if (settings.apiKeyUnreadable) {
+		blocks.push({
+			type: "banner",
+			variant: "alert",
+			title: "Your Anthropic API key cannot be read",
+			description:
+				"The site's encryption key (EMDASH_ENCRYPTION_KEY) changed since the key was saved. Enter the key again in the plugin settings. Until then, no alt text is written.",
+		});
+	} else if (!settings.apiKey) {
 		blocks.push({
 			type: "banner",
 			variant: "alert",

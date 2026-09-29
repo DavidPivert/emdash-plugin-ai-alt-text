@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { buildRequest, cleanAlt, languageName, parseResponse, resolveModel } from "../src/claude";
 import { decide, referenceFor } from "../src/entries";
 import { findMediaFields, isPrivateUrl, isSupportedImage, publicImageUrl, sameLanguage, valueAtPath } from "../src/media";
+import { NON_SECRET_SETTING_PREFIXES } from "../src/settings";
+import manifest from "../emdash-plugin.jsonc?raw";
 
 describe("media helpers", () => {
 	const cover = { id: "m1", src: "/_emdash/api/media/file/a.jpg", meta: { storageKey: "a.jpg" } };
@@ -204,5 +206,16 @@ describe("referenceFor", () => {
 
 	it("has nothing to start from when the image has no alt text", () => {
 		expect(referenceFor({ ...other, fieldAlt: undefined, mediaAlt: null }, "fr", "fr")).toBeUndefined();
+	});
+});
+
+describe("settings fallback", () => {
+	it("reaches every setting but the API key", () => {
+		const schema = manifest.slice(manifest.indexOf("settingsSchema"));
+		const keys = [...schema.matchAll(/^\t{3}"?([a-zA-Z]+)"?\s*:\s*\{/gm)].map((match) => match[1]!);
+		expect(keys).toContain("apiKey");
+		for (const key of keys) {
+			expect(NON_SECRET_SETTING_PREFIXES.some((prefix) => key.startsWith(prefix)), key).toBe(key !== "apiKey");
+		}
 	});
 });

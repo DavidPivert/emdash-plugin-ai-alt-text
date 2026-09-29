@@ -37,6 +37,7 @@ EmDash already copies the alt text of a media library image into every entry tha
 - Alt text is one sentence of at most 125 characters. Claude never identifies people from their appearance: a name appears only when the alt text it translates already gives it.
 - Top-level image fields and images inside top-level lists (galleries) are covered. Images embedded in rich text are not, yet.
 - Each request stays within the sandbox's limits (10 host calls, 30 seconds).
+- **If the site's `EMDASH_ENCRYPTION_KEY` changes**, the stored API key can no longer be read: the admin page says so, and nothing is written until you enter the key again. Saves are never blocked.
 
 ## Permissions
 
@@ -65,7 +66,7 @@ pnpm run build
 
 ## Changes
 
-- **0.2.0**: entries in other languages get the existing alt text translated, checked against the image, instead of a new description. Translations keep the release, the artist and other names a person wrote; the admin shows which alt text was translated.
+- **0.2.0**: entries in other languages get the existing alt text translated, checked against the image, instead of a new description. Translations keep the release, the artist and other names a person wrote; the admin shows which alt text was translated. A stored API key that can no longer be decrypted no longer breaks the admin page.
 - **0.1.0**: first release.
 
 ## License

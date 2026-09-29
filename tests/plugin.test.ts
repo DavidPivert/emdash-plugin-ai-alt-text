@@ -229,6 +229,22 @@ describe("safety", () => {
 		expect(await logCount(runtime)).toBe(0);
 	});
 
+	it("keeps saves and the admin page working when the stored key can no longer be decrypted", async () => {
+		const runtime = await setup();
+		vi.stubEnv("EMDASH_ENCRYPTION_KEY", `emdash_enc_v1_${"B".repeat(42)}A`);
+		const image = await libraryImage(runtime, "decimate.jpg");
+
+		const item = await create(runtime, { title: "Decimate", cover: image.value() }, "fr");
+		await settle(runtime);
+
+		expect(runtime.http.requests()).toEqual([]);
+		expect((await published(runtime, item.id)).title).toBe("Decimate");
+		const page = await runtime.admin.loadPage("/audit");
+		expect(page.blocks).toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "banner", title: "Your Anthropic API key cannot be read" })]),
+		);
+	});
+
 	it("stores the API key encrypted", async () => {
 		const runtime = await setup();
 		expect(JSON.stringify(await runtime.inspect.settings.raw<unknown>("apiKey"))).not.toContain(API_KEY);
