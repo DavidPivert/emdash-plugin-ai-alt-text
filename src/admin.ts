@@ -65,11 +65,22 @@ function header(settings: Settings): Block[] {
 			description: "Add your key in the plugin settings. Until then, no alt text is written.",
 		});
 	}
+	if (settings.mediaLanguageFrom === "site") {
+		blocks.push({
+			type: "banner",
+			title: `Is your media library alt text in "${settings.mediaLanguage}"?`,
+			description:
+				"Entries in that language inherit it; entries in other languages get their own. If your site's main language is different, set \"Media library language\" in the plugin settings (for example fr).",
+		});
+	}
 	blocks.push({
 		type: "fields",
 		fields: [
 			{ label: "Model", value: settings.model },
-			{ label: "Media library language", value: settings.mediaLanguage },
+			{
+				label: "Media library language",
+				value: settings.mediaLanguageFrom === "setting" ? settings.mediaLanguage : `${settings.mediaLanguage} (site language from EmDash settings)`,
+			},
 			{ label: "New images", value: settings.onUpload ? "Described on upload" : "Off" },
 			{ label: "Saving entries", value: settings.onSave ? "Completes missing and translated alt text" : "Off" },
 		],

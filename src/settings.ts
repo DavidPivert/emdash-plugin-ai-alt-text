@@ -7,6 +7,8 @@ export interface Settings {
 	model: Model;
 	/** Language of the alt text stored in the media library (shared by every entry). */
 	mediaLanguage: string;
+	/** Where mediaLanguage comes from: the plugin setting, or the site language from EmDash settings. */
+	mediaLanguageFrom: "setting" | "site";
 	onUpload: boolean;
 	onSave: boolean;
 	siteUrl: string;
@@ -28,6 +30,7 @@ export async function readSettings(ctx: PluginContext): Promise<Settings> {
 		apiKey: typeof apiKey === "string" && apiKey.trim() ? apiKey.trim() : null,
 		model: resolveModel(values.get("model")),
 		mediaLanguage: text("mediaLanguage") || ctx.site.locale || "en",
+		mediaLanguageFrom: text("mediaLanguage") ? "setting" : "site",
 		onUpload: values.get("onUpload") !== false,
 		onSave: values.get("onSave") !== false,
 		siteUrl: (text("siteUrl") || ctx.site.url || "").replace(/\/+$/, ""),
