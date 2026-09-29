@@ -3,8 +3,9 @@
  *
  * Sandboxed plugins reach the network only through `ctx.http.fetch`, which is
  * why this calls the HTTP API directly instead of using `@anthropic-ai/sdk`.
- * The image is passed by URL: Anthropic downloads it, so nothing heavy is
- * encoded inside the sandbox (50 ms CPU budget per invocation).
+ * Images used in entries are passed by public URL (Anthropic downloads them,
+ * no work in the sandbox). Media library items have no public URL for plugins,
+ * so their bytes are sent instead, with a size cap (50 ms CPU per invocation).
  */
 
 export const API_URL = "https://api.anthropic.com/v1/messages";
@@ -26,14 +27,20 @@ const SYSTEM_PROMPT = [
 	"Reply with the alt text only, without quotes.",
 ].join(" ");
 
+export type ImageSource =
+	| { type: "url"; url: string }
+	| { type: "base64"; media_type: string; data: string };
+
 export interface AltRequest {
 	model: Model;
-	imageUrl: string;
-	/** BCP 47 tag of the entry, e.g. `fr` or `en-GB`. */
+	image: ImageSource;
+	/** BCP 47 tag of the language to write in, e.g. `fr` or `en-GB`. */
 	locale: string;
 	/** Optional context: the entry title and the field holding the image. */
 	entryTitle?: string;
 	field?: string;
+	/** Optional context: the uploaded file name. */
+	filename?: string;
 }
 
 export function languageName(locale: string): string {
@@ -48,9 +55,12 @@ export function languageName(locale: string): string {
 }
 
 export function buildRequest(input: AltRequest): { headers: Record<string, string>; body: Record<string, unknown> } {
-	const context = input.entryTitle
-		? ` It illustrates the entry "${input.entryTitle.slice(0, 200)}"${input.field ? ` (field "${input.field}")` : ""}.`
-		: "";
+	let context = "";
+	if (input.entryTitle) {
+		context = ` It illustrates the entry "${input.entryTitle.slice(0, 200)}"${input.field ? ` (field "${input.field}")` : ""}.`;
+	} else if (input.filename) {
+		context = ` The file is named "${input.filename.slice(0, 120)}", which may help but can be wrong.`;
+	}
 	const body: Record<string, unknown> = {
 		model: input.model,
 		max_tokens: 300,
@@ -59,7 +69,7 @@ export function buildRequest(input: AltRequest): { headers: Record<string, strin
 			{
 				role: "user",
 				content: [
-					{ type: "image", source: { type: "url", url: input.imageUrl } },
+					{ type: "image", source: input.image },
 					{ type: "text", text: `Write the alt text for this image in ${languageName(input.locale)}.${context}` },
 				],
 			},

@@ -1,23 +1,27 @@
 import type { SandboxedPlugin } from "emdash/plugin";
 
-import { handleAdmin } from "./admin";
-import { entryTitle, fillAlts, readSettings, saveLog } from "./generate";
+import { entryTitle, handleAdmin } from "./admin";
+import { processEntry } from "./entries";
+import { describeMediaItem } from "./library";
+import { saveLog } from "./log";
+import { Budget, coversCollection, HOST_CALLS_PER_INVOCATION, readSettings } from "./settings";
 
 /**
- * AI Alt Text — writes alt text for images with Claude.
+ * AI Alt Text — alt text for images, written by Claude.
  *
- * - Existing entries: `content:beforeSave` fills image fields that have no alt
- *   text, in the entry's language, inside the save itself.
- * - New entries: the save hook does not receive the entry's language, so
- *   `content:afterSave` writes the alt text once the entry exists (EmDash keeps
- *   that hook alive with waitUntil). The change lands like any plugin edit: in
- *   the entry's draft when the collection uses revisions.
+ * EmDash copies the media library's alt text into every image field left
+ * without one, so the media library is where most alt text belongs:
+ * - `media:afterUpload` describes new images in the media library language.
+ * - Saving an entry fills what is still missing: an image with no alt text
+ *   anywhere is described (media library + field), and an entry in another
+ *   language gets alt text in its own language instead of the inherited one.
+ * - The admin page catches up on existing images and translations.
  *
- * Claude downloads each image from its public URL. A failure (no key, API
- * error, timeout) only skips the alt text: these hooks never block a save.
+ * A failure (no key, API error, timeout) only skips the alt text: these hooks
+ * never block an upload or a save. Every invocation stays within 10 host calls.
  */
 const HOOK_OPTIONS = {
-	// Vision calls take a few seconds each; the default 5 s would cut them off.
+	// Vision calls take a few seconds; the default 5 s would cut them off.
 	// Sandboxed invocations stop at 30 s of wall time.
 	timeout: 25_000,
 	errorPolicy: "continue",
@@ -25,24 +29,35 @@ const HOOK_OPTIONS = {
 
 const plugin: SandboxedPlugin = {
 	hooks: {
+		"media:afterUpload": {
+			...HOOK_OPTIONS,
+			handler: async (event, ctx) => {
+				const settings = await readSettings(ctx);
+				if (!settings.onUpload || !settings.apiKey) return;
+				// settings (2) + log (1) reserved.
+				const entry = await describeMediaItem(ctx, settings, event.media, new Budget(HOST_CALLS_PER_INVOCATION - 3));
+				await saveLog(ctx, [entry]);
+			},
+		},
 		"content:beforeSave": {
 			...HOOK_OPTIONS,
 			handler: async (event, ctx) => {
-				if (!event.id) return; // new entry: handled after the save
+				if (!event.id) return; // new entry: its language is only known after the save
 				const settings = await readSettings(ctx);
-				if (!settings.autoGenerate || !settings.apiKey) return;
-				if (settings.collections.length > 0 && !settings.collections.includes(event.collection)) return;
+				if (!settings.onSave || !settings.apiKey || !coversCollection(settings, event.collection)) return;
 
-				const content = structuredClone(event.content);
+				// settings (2) + entry read (1) + log (1) reserved.
+				const budget = new Budget(HOST_CALLS_PER_INVOCATION - 4);
 				const existing = await ctx.content?.get(event.collection, event.id);
-				const result = await fillAlts(ctx, settings, content, {
+				const content = structuredClone(event.content);
+				const result = await processEntry(ctx, settings, content, {
 					collection: event.collection,
-					contentId: event.id,
+					id: event.id,
 					locale: existing?.locale ?? ctx.site.locale ?? "en",
-					entryTitle: entryTitle(content),
-					overwrite: settings.overwrite,
-					limit: settings.maxPerSave,
-				});
+					title: entryTitle(content),
+					phase: "before-save",
+					checkSource: false,
+				}, budget);
 				await saveLog(ctx, result.log);
 				return result.changed > 0 ? content : undefined;
 			},
@@ -54,18 +69,19 @@ const plugin: SandboxedPlugin = {
 				const item = event.content as { id?: unknown; locale?: unknown; data?: unknown };
 				if (typeof item.id !== "string" || !item.data || typeof item.data !== "object") return;
 				const settings = await readSettings(ctx);
-				if (!settings.autoGenerate || !settings.apiKey || !ctx.content?.update) return;
-				if (settings.collections.length > 0 && !settings.collections.includes(event.collection)) return;
+				if (!settings.onSave || !settings.apiKey || !ctx.content?.update || !coversCollection(settings, event.collection)) return;
 
+				// settings (2) + entry update (1) + log (1) reserved.
+				const budget = new Budget(HOST_CALLS_PER_INVOCATION - 4);
 				const data = structuredClone(item.data as Record<string, unknown>);
-				const result = await fillAlts(ctx, settings, data, {
+				const result = await processEntry(ctx, settings, data, {
 					collection: event.collection,
-					contentId: item.id,
+					id: item.id,
 					locale: typeof item.locale === "string" && item.locale ? item.locale : ctx.site.locale || "en",
-					entryTitle: entryTitle(data),
-					overwrite: settings.overwrite,
-					limit: settings.maxPerSave,
-				});
+					title: entryTitle(data),
+					phase: "after-save",
+					checkSource: true,
+				}, budget);
 				if (result.changed > 0) await ctx.content.update(event.collection, item.id, data);
 				await saveLog(ctx, result.log);
 			},

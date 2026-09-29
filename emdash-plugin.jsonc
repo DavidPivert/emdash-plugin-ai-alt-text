@@ -21,12 +21,22 @@
 	// Trust contract — what runtime APIs the plugin asks for.
 	// Changing these between releases requires a version bump because
 	// installed users have consented to the old contract.
-	//  - content:write   — required by content:beforeSave; saves the alt text
-	//                      written from the admin page.
-	//  - content:read    — reads entries for the audit page.
-	//  - schema:read     — finds collections that have image fields.
-	//  - network:request — calls the Claude API (only api.anthropic.com).
-	"capabilities": ["content:read", "content:write", "schema:read", "network:request"],
+	//  - content:write        — required by content:beforeSave; saves alt text into entries.
+	//  - content:read         — reads entries, their language and the entry they translate.
+	//  - schema:read          — finds collections that have image fields.
+	//  - media:read           — required by media:afterUpload; reads media library alt text.
+	//  - media:bytes:read     — reads images that have no public URL (media library, up to 3 MB).
+	//  - media:metadata:write — saves alt text on media library items (alt, caption, focal point only).
+	//  - network:request      — calls the Claude API (only api.anthropic.com).
+	"capabilities": [
+		"content:read",
+		"content:write",
+		"schema:read",
+		"media:read",
+		"media:bytes:read",
+		"media:metadata:write",
+		"network:request"
+	],
 	"allowedHosts": ["api.anthropic.com"],
 	"storage": {
 		"alt_log": { "indexes": ["collection", "status", "at"] }
@@ -39,12 +49,12 @@
 			"apiKey": {
 				"type": "secret",
 				"label": "Anthropic API key",
-				"description": "From console.anthropic.com. Stored encrypted. Without it, no alt text is written."
+				"description": "From console.anthropic.com, scoped to a workspace. Stored encrypted. Without it, no alt text is written."
 			},
 			"model": {
 				"type": "select",
 				"label": "Claude model",
-				"description": "Haiku is fast enough to run while content is saved. Sonnet and Opus write richer descriptions but take longer.",
+				"description": "Haiku is fast enough to run during uploads and saves. Sonnet and Opus write richer descriptions but take longer.",
 				"options": [
 					{ "value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (fast, recommended)" },
 					{ "value": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5" },
@@ -52,25 +62,22 @@
 				],
 				"default": "claude-haiku-4-5"
 			},
-			"autoGenerate": {
+			"mediaLanguage": {
+				"type": "string",
+				"label": "Media library language",
+				"description": "Language tag of the alt text stored in the media library, which entries in that language inherit (for example fr or en). Empty means the site language."
+			},
+			"onUpload": {
 				"type": "boolean",
-				"label": "Write alt text when content is saved",
-				"description": "Fills images that have no alt text. A failure never blocks the save.",
+				"label": "Describe new images on upload",
+				"description": "Writes alt text on the media library item. An upload is never blocked.",
 				"default": true
 			},
-			"maxPerSave": {
-				"type": "number",
-				"label": "Images per save",
-				"description": "Upper bound per save, to stay within the time allowed. The rest can be written from the Alt text page.",
-				"min": 1,
-				"max": 5,
-				"default": 3
-			},
-			"overwrite": {
+			"onSave": {
 				"type": "boolean",
-				"label": "Rewrite existing alt text on save",
-				"description": "Off keeps alt text written by people.",
-				"default": false
+				"label": "Complete alt text when entries are saved",
+				"description": "Describes images that have no alt text anywhere, and gives entries in other languages alt text in their own language. Alt text written by people is kept.",
+				"default": true
 			},
 			"collections": {
 				"type": "string",
@@ -80,7 +87,7 @@
 			"siteUrl": {
 				"type": "url",
 				"label": "Public site URL",
-				"description": "Claude downloads images from this address. Leave empty to use the site URL from EmDash settings.",
+				"description": "Claude downloads the images used in entries from this address. Leave empty to use the site URL from EmDash settings.",
 				"placeholder": "https://example.com"
 			}
 		}

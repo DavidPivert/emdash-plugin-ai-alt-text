@@ -1,12 +1,14 @@
-import type { PluginContext } from "emdash/plugin";
+import type { MediaItem, PluginContext } from "emdash/plugin";
 
-import { type AltLogEntry, entryTitle, fillAlts, readSettings, saveLog, type Settings } from "./generate";
-import { findMediaFields, hasAlt } from "./media";
+import { processEntry } from "./entries";
+import { CALLS_PER_MEDIA_ITEM, describeMediaItem, MAX_MEDIA_BYTES, needsAlt } from "./library";
+import { type AltLogEntry, saveLog } from "./log";
+import { findMediaFields, sameLanguage } from "./media";
+import { Budget, coversCollection, HOST_CALLS_PER_INVOCATION, readSettings, type Settings } from "./settings";
 
 /**
- * Block Kit admin surfaces. Every interaction is budgeted: a sandboxed
- * invocation may make at most 10 host calls, so the audit scans one collection
- * page at a time and the dashboard widget only reads the plugin's own log.
+ * Block Kit admin surfaces. Every interaction stays within 10 host calls, so
+ * lists are paginated and bulk actions handle two images at a time.
  */
 
 type Block = Record<string, unknown>;
@@ -16,29 +18,44 @@ interface Interaction {
 	action_id?: string;
 	value?: unknown;
 }
+type MediaRef = Pick<MediaItem, "id" | "filename" | "mimeType" | "size">;
 
-const SCAN_PAGE_SIZE = 50;
+const PAGE_SIZE = 50;
+const BULK_MEDIA = 2;
 const SEP = "|";
+
+export function entryTitle(data: Record<string, unknown>): string | undefined {
+	const value = data.title ?? data.name;
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
 
 export async function handleAdmin(input: unknown, ctx: PluginContext): Promise<{ blocks: Block[]; toast?: Record<string, string> }> {
 	const interaction = (input && typeof input === "object" ? input : {}) as Interaction;
-	const page = interaction.page ?? "/audit";
-	if (page.startsWith("widget:")) return { blocks: await activityWidget(ctx) };
+	if ((interaction.page ?? "").startsWith("widget:")) return { blocks: await activityWidget(ctx) };
 
 	const settings = await readSettings(ctx);
-	const value = typeof interaction.value === "string" ? interaction.value : "";
-	if (interaction.type === "block_action" && (interaction.action_id === "scan" || interaction.action_id === "scan-page")) {
-		const [collection = "", cursor] = value.split(SEP);
-		return { blocks: await scanBlocks(ctx, settings, collection, cursor || undefined) };
+	const action = interaction.type === "block_action" ? interaction.action_id : undefined;
+	const value = interaction.value;
+	switch (action) {
+		case "media-scan":
+			return { blocks: await mediaScan(ctx, settings, typeof value === "string" && value ? value : undefined) };
+		case "media-describe":
+			return describeMedia(ctx, settings, Array.isArray(value) ? (value as MediaRef[]) : []);
+		case "scan":
+		case "scan-page": {
+			const [collection = "", cursor] = String(value ?? "").split(SEP);
+			return { blocks: await entryScan(ctx, settings, collection, cursor || undefined) };
+		}
+		case "complete": {
+			const [collection = "", id = ""] = String(value ?? "").split(SEP);
+			return completeEntry(ctx, settings, collection, id);
+		}
+		default:
+			return { blocks: await overview(ctx, settings) };
 	}
-	if (interaction.type === "block_action" && interaction.action_id === "generate") {
-		const [collection = "", id = ""] = value.split(SEP);
-		return generateForEntry(ctx, settings, collection, id);
-	}
-	return { blocks: await overviewBlocks(ctx, settings) };
 }
 
-function statusBlocks(settings: Settings): Block[] {
+function header(settings: Settings): Block[] {
 	const blocks: Block[] = [{ type: "header", text: "AI alt text" }];
 	if (!settings.apiKey) {
 		blocks.push({
@@ -52,144 +69,215 @@ function statusBlocks(settings: Settings): Block[] {
 		type: "fields",
 		fields: [
 			{ label: "Model", value: settings.model },
-			{ label: "On save", value: settings.autoGenerate ? `On, up to ${settings.maxPerSave} image(s) per save` : "Off" },
-			{ label: "Existing alt text", value: settings.overwrite ? "Rewritten" : "Kept" },
-			{ label: "Image URLs from", value: settings.siteUrl || "unknown site URL" },
+			{ label: "Media library language", value: settings.mediaLanguage },
+			{ label: "New images", value: settings.onUpload ? "Described on upload" : "Off" },
+			{ label: "Saving entries", value: settings.onSave ? "Completes missing and translated alt text" : "Off" },
 		],
 	});
 	return blocks;
 }
 
-async function imageCollections(ctx: PluginContext, settings: Settings) {
-	const collections = (await ctx.schema?.listCollections()) ?? [];
-	return collections.filter(
-		(collection) =>
-			collection.fields.some((field) => field.type === "image") &&
-			(settings.collections.length === 0 || settings.collections.includes(collection.slug)),
+const backButton = { type: "button", action_id: "overview", label: "Back" };
+
+async function overview(ctx: PluginContext, settings: Settings): Promise<Block[]> {
+	const blocks = header(settings);
+	blocks.push(
+		{ type: "divider" },
+		{
+			type: "section",
+			text: "Media library: entries inherit the alt text of their images from here.",
+			accessory: { type: "button", action_id: "media-scan", label: "Find images without alt text", value: "" },
+		},
+		{ type: "divider" },
+		{
+			type: "section",
+			text: `Entries: entries in "${settings.mediaLanguage}" inherit the media library alt text. Check entries in other languages to give their images alt text in their own language.`,
+		},
 	);
+	const collections = ((await ctx.schema?.listCollections()) ?? []).filter(
+		(collection) => collection.fields.some((field) => field.type === "image") && coversCollection(settings, collection.slug),
+	);
+	if (collections.length === 0) {
+		blocks.push({ type: "context", text: "No collection has an image field." });
+	} else {
+		blocks.push({
+			type: "actions",
+			elements: collections.map((collection) => ({ type: "button", action_id: "scan", label: collection.label, value: `${collection.slug}${SEP}` })),
+		});
+	}
+	return blocks;
 }
 
-async function overviewBlocks(ctx: PluginContext, settings: Settings): Promise<Block[]> {
-	const blocks = statusBlocks(settings);
-	const collections = await imageCollections(ctx, settings);
-	if (collections.length === 0) {
-		blocks.push({ type: "empty", title: "No collection with an image field", description: "Nothing to audit." });
-		return blocks;
-	}
-	blocks.push({ type: "section", text: "Check a collection for images without alt text:" });
+async function mediaScan(ctx: PluginContext, settings: Settings, cursor?: string): Promise<Block[]> {
+	const blocks = header(settings);
+	if (!ctx.media) return [...blocks, { type: "banner", variant: "error", title: "Media access unavailable" }];
+	const page = await ctx.media.list({ limit: PAGE_SIZE, cursor });
+	const missing = page.items.filter(needsAlt);
+	const refs: MediaRef[] = missing.map(({ id, filename, mimeType, size }) => ({ id, filename, mimeType, size }));
 	blocks.push({
-		type: "actions",
-		elements: collections.map((collection) => ({
-			type: "button",
-			action_id: "scan",
-			label: collection.label,
-			value: `${collection.slug}${SEP}`,
+		type: "section",
+		text: `${missing.length} image(s) without alt text in this page of ${page.items.length} media item(s). Images over ${Math.round(MAX_MEDIA_BYTES / 1024 / 1024)} MB are described when an entry uses them.`,
+		accessory: backButton,
+	});
+	if (refs.length > 0) {
+		blocks.push({
+			type: "actions",
+			elements: [
+				{
+					type: "button",
+					action_id: "media-describe",
+					label: `Describe the first ${Math.min(BULK_MEDIA, refs.length)}`,
+					style: "primary",
+					value: refs.slice(0, BULK_MEDIA),
+				},
+			],
+		});
+	}
+	blocks.push({
+		type: "table",
+		columns: [
+			{ key: "file", label: "File" },
+			{ key: "size", label: "Size" },
+			{ key: "action", label: "", format: "element" },
+		],
+		rows: refs.map((ref) => ({
+			file: ref.filename,
+			size: ref.size === null ? "—" : `${Math.round(ref.size / 1024)} KB`,
+			action: { type: "button", action_id: "media-describe", label: "Describe", value: [ref] },
 		})),
+		page_action_id: "media-scan",
+		...(page.hasMore && page.cursor ? { next_cursor: page.cursor } : {}),
+		empty_text: "Every image in this page has alt text.",
 	});
 	return blocks;
 }
 
-async function scanBlocks(ctx: PluginContext, settings: Settings, collection: string, cursor?: string): Promise<Block[]> {
-	const blocks = statusBlocks(settings);
+async function describeMedia(
+	ctx: PluginContext,
+	settings: Settings,
+	refs: MediaRef[],
+): Promise<{ blocks: Block[]; toast?: Record<string, string> }> {
+	const blocks = header(settings);
+	if (!settings.apiKey) return { blocks, toast: { type: "error", message: "Add an Anthropic API key first" } };
+	// settings (2) + log (1) reserved.
+	const budget = new Budget(HOST_CALLS_PER_INVOCATION - 3);
+	const log: AltLogEntry[] = [];
+	for (const ref of refs.slice(0, BULK_MEDIA)) {
+		if (budget.left < CALLS_PER_MEDIA_ITEM) break;
+		log.push(await describeMediaItem(ctx, settings, { ...ref, url: "", createdAt: "", alt: null }, budget));
+	}
+	await saveLog(ctx, log);
+	return resultBlocks(blocks, log, { type: "button", action_id: "media-scan", label: "Back to the media library", value: "" });
+}
+
+async function entryScan(ctx: PluginContext, settings: Settings, collection: string, cursor?: string): Promise<Block[]> {
+	const blocks = header(settings);
 	if (!ctx.content || !collection) return [...blocks, { type: "banner", variant: "error", title: "Content access unavailable" }];
-	const page = await ctx.content.list(collection, { limit: SCAN_PAGE_SIZE, cursor });
+	const page = await ctx.content.list(collection, { limit: PAGE_SIZE, cursor });
 	const rows = page.items.flatMap((item) => {
-		const missing = findMediaFields(item.data).filter(({ value }) => !hasAlt(value));
-		if (missing.length === 0) return [];
+		const images = findMediaFields(item.data);
+		if (images.length === 0) return [];
+		const locale = item.locale ?? settings.mediaLanguage;
+		const first = images.find(({ value }) => value.alt?.trim())?.value.alt ?? "";
+		const settled = sameLanguage(locale, settings.mediaLanguage) && images.every(({ value }) => value.alt?.trim());
 		return [
 			{
 				entry: entryTitle(item.data) ?? item.slug ?? item.id,
-				locale: item.locale ?? "—",
-				state: item.draftRevisionId && item.draftRevisionId !== item.liveRevisionId ? `${item.status}, unpublished changes` : item.status,
-				fields: missing.map(({ field }) => field).join(", "),
+				locale,
+				alt: first ? (first.length > 90 ? `${first.slice(0, 90)}…` : first) : "(none)",
 				action: {
 					type: "button",
-					action_id: "generate",
-					label: "Write alt text",
+					action_id: "complete",
+					label: settled ? "Check" : "Complete",
 					value: `${collection}${SEP}${item.id}`,
-					style: "primary",
+					...(settled ? {} : { style: "primary" }),
 				},
 			},
 		];
 	});
 	blocks.push({
 		type: "section",
-		text: `Collection "${collection}": ${rows.length} entr${rows.length === 1 ? "y" : "ies"} with images missing alt text in this page of ${page.items.length}.`,
-		accessory: { type: "button", action_id: "overview", label: "All collections" },
+		text: `"${collection}": ${rows.length} entr${rows.length === 1 ? "y" : "ies"} with images in this page. Check that the alt text is in the entry's language.`,
+		accessory: backButton,
 	});
 	blocks.push({
 		type: "table",
 		columns: [
 			{ key: "entry", label: "Entry" },
 			{ key: "locale", label: "Language", format: "badge" },
-			{ key: "state", label: "Status" },
-			{ key: "fields", label: "Images without alt", format: "code" },
+			{ key: "alt", label: "Current alt text" },
 			{ key: "action", label: "", format: "element" },
 		],
 		rows,
 		page_action_id: "scan-page",
 		...(page.hasMore && page.cursor ? { next_cursor: `${collection}${SEP}${page.cursor}` } : {}),
-		empty_text: "Every image in this page has alt text.",
+		empty_text: "No entry with images in this page.",
 	});
 	return blocks;
 }
 
-async function generateForEntry(
+async function completeEntry(
 	ctx: PluginContext,
 	settings: Settings,
 	collection: string,
 	id: string,
 ): Promise<{ blocks: Block[]; toast?: Record<string, string> }> {
-	if (!ctx.content?.update || !collection || !id) {
-		return { blocks: [...statusBlocks(settings), { type: "banner", variant: "error", title: "Content access unavailable" }] };
-	}
-	if (!settings.apiKey) {
-		return { blocks: statusBlocks(settings), toast: { type: "error", message: "Add an Anthropic API key first" } };
-	}
+	const blocks = header(settings);
+	if (!ctx.content?.update || !collection || !id) return { blocks: [...blocks, { type: "banner", variant: "error", title: "Content access unavailable" }] };
+	if (!settings.apiKey) return { blocks, toast: { type: "error", message: "Add an Anthropic API key first" } };
 	const item = await ctx.content.get(collection, id);
-	if (!item) return { blocks: statusBlocks(settings), toast: { type: "error", message: "Entry not found" } };
+	if (!item) return { blocks, toast: { type: "error", message: "Entry not found" } };
 
+	// settings (2) + entry read (1) + update (1) + log (1) reserved.
+	const budget = new Budget(HOST_CALLS_PER_INVOCATION - 5);
 	const data = structuredClone(item.data);
-	const result = await fillAlts(ctx, settings, data, {
+	const result = await processEntry(ctx, settings, data, {
 		collection,
-		contentId: item.id,
-		locale: item.locale ?? ctx.site.locale ?? "en",
-		entryTitle: entryTitle(item.data),
-		overwrite: false,
-		limit: settings.maxPerSave,
-	});
-	// Host calls: 2 (settings) + 1 (get) + up to 5 (Claude) + 1 (update) + 1 (log) = 10 at most.
+		id: item.id,
+		locale: item.locale ?? settings.mediaLanguage,
+		title: entryTitle(item.data),
+		phase: "after-save",
+		checkSource: true,
+	}, budget);
 	if (result.changed > 0) await ctx.content.update(collection, item.id, data);
 	await saveLog(ctx, result.log);
-
-	const blocks = statusBlocks(settings);
-	blocks.push({
-		type: "section",
-		text: `${entryTitle(item.data) ?? item.slug ?? item.id}: ${result.changed} alt text(s) written${result.remaining > 0 ? `, ${result.remaining} still missing` : ""}.`,
-		accessory: { type: "button", action_id: "scan", label: "Back to the list", value: `${collection}${SEP}` },
-	});
-	const written = result.log.filter((entry) => entry.status === "generated");
-	if (written.length > 0) {
-		blocks.push({ type: "fields", fields: written.map((entry) => ({ label: entry.field, value: entry.alt })) });
+	const back = { type: "button", action_id: "scan", label: "Back to the list", value: `${collection}${SEP}` };
+	const title = entryTitle(item.data) ?? item.slug ?? item.id;
+	if (result.log.length === 0 && result.remaining === 0) {
+		blocks.push({ type: "section", text: `${title}: nothing to change. Its alt text is already in its language.`, accessory: back });
+		return { blocks };
 	}
+	const response = resultBlocks(blocks, result.log, back);
+	if (result.remaining > 0) response.blocks.push({ type: "context", text: `${result.remaining} image(s) left: run it again.` });
 	if (result.changed > 0) {
-		// Plugin edits follow the collection's workflow: with revisions they land in the draft.
-		blocks.push({
+		response.blocks.push({
 			type: "banner",
 			title: "Alt text saved",
-			description: "If this collection keeps drafts, publish the entry to put the alt text online. It stays listed here until then.",
+			description: "If this collection keeps drafts, publish the entry to put the alt text online.",
 		});
 	}
-	const failed = result.log.filter((entry) => entry.status !== "generated");
+	return response;
+}
+
+function resultBlocks(blocks: Block[], log: AltLogEntry[], back: Block): { blocks: Block[]; toast?: Record<string, string> } {
+	const written = log.filter((entry) => entry.status === "generated" || entry.status === "copied");
+	const failed = log.filter((entry) => entry.status === "error" || entry.status === "skipped");
+	blocks.push({ type: "section", text: `${written.length} alt text(s) written.`, accessory: back });
+	if (written.length > 0) {
+		blocks.push({
+			type: "fields",
+			fields: written.map((entry) => ({
+				label: `${entry.field}${entry.target === "media" ? " (media library)" : ""} · ${entry.locale}`,
+				value: entry.alt,
+			})),
+		});
+	}
 	if (failed.length > 0) {
 		blocks.push({ type: "context", text: failed.map((entry) => `${entry.field}: ${entry.message ?? entry.status}`).join(" · ") });
 	}
 	return {
 		blocks,
-		toast:
-			result.changed > 0
-				? { type: "success", message: `${result.changed} alt text(s) written` }
-				: { type: "error", message: "No alt text written" },
+		toast: written.length > 0 ? { type: "success", message: `${written.length} alt text(s) written` } : { type: "error", message: "No alt text written" },
 	};
 }
 
@@ -202,19 +290,21 @@ async function activityWidget(ctx: PluginContext): Promise<Block[]> {
 		entries = [];
 	}
 	if (entries.length === 0) {
-		return [{ type: "empty", title: "No alt text written yet", description: "Alt text appears here as content is saved.", size: "sm" }];
+		return [{ type: "empty", title: "No alt text written yet", description: "Alt text appears here as images are uploaded and entries saved.", size: "sm" }];
 	}
-	const generated = entries.filter((entry) => entry.status === "generated").length;
+	const written = entries.filter((entry) => entry.status === "generated").length;
 	const failed = entries.filter((entry) => entry.status === "error").length;
 	const last = entries.find((entry) => entry.status === "generated");
 	return [
 		{
 			type: "stats",
 			items: [
-				{ label: "Written (last 50 events)", value: generated },
+				{ label: "Written (last 50 events)", value: written },
 				{ label: "Failed", value: failed, trend: failed > 0 ? "down" : "neutral" },
 			],
 		},
-		...(last ? [{ type: "context", text: `Latest: "${last.alt}" (${last.collection}, ${last.at.slice(0, 10)})` }] : []),
+		...(last
+			? [{ type: "context", text: `Latest: "${last.alt}" (${last.collection === "media" ? "media library" : last.collection}, ${last.locale}, ${last.at.slice(0, 10)})` }]
+			: []),
 	];
 }

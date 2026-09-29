@@ -5,6 +5,7 @@ import { createPluginRuntimeTestHost, type PluginRuntimeTestHost } from "@emdash
 const API = "https://api.anthropic.com/v1/messages";
 const ENCRYPTION_KEY = `emdash_enc_v1_${"A".repeat(43)}`;
 const API_KEY = "sk-ant-test-key";
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 16, 74, 70, 73, 70, 0, 1, 0xff, 0xd9]);
 
 let host: PluginRuntimeTestHost | undefined;
 
@@ -14,11 +15,11 @@ afterEach(async () => {
 	vi.unstubAllEnvs();
 });
 
-type ImageValue = { alt?: string };
-
-function image(key: string, alt?: string) {
-	return { id: `media-${key}`, src: `/_emdash/api/media/file/${key}`, meta: { storageKey: key }, ...(alt ? { alt } : {}) };
-}
+type ImageValue = { id?: string; alt?: string; provider?: string; meta?: { storageKey?: string } };
+type SentRequest = {
+	apiKey: string | undefined;
+	body: { model: string; messages: Array<{ content: Array<{ type: string; text?: string; source?: { type: string; url?: string } }> }> };
+};
 
 function claudeSays(text: string, status = 200): Response {
 	const body =
@@ -37,7 +38,6 @@ async function setup(settings: Record<string, unknown> = { apiKey: API_KEY }): P
 		fields: [
 			{ slug: "title", label: "Title", type: "string" },
 			{ slug: "cover", label: "Cover", type: "image" },
-			{ slug: "back", label: "Back cover", type: "image" },
 		],
 	});
 	await configure(host, settings);
@@ -45,202 +45,250 @@ async function setup(settings: Record<string, unknown> = { apiKey: API_KEY }): P
 }
 
 async function configure(runtime: PluginRuntimeTestHost, settings: Record<string, unknown>) {
-	const updated = await runtime.actions.plugin.updateSettings(settings);
-	expect(updated).toMatchObject({ success: true });
+	expect(await runtime.actions.plugin.updateSettings(settings)).toMatchObject({ success: true });
 }
 
-async function create(runtime: PluginRuntimeTestHost, data: Record<string, unknown>, locale?: string) {
-	const created = await runtime.actions.content.create("albums", { data, ...(locale ? { locale } : {}) });
+async function mediaItem(runtime: PluginRuntimeTestHost, id: string) {
+	const result = (await runtime.inspect.media(id)) as unknown as { success: boolean; data: { item: { storageKey: string; alt?: string | null } } };
+	return result.data.item;
+}
+
+/** A media library image, and the value an image field stores for it. */
+async function libraryImage(runtime: PluginRuntimeTestHost, filename: string, alt?: string) {
+	const { id } = await runtime.fixtures.media({ filename, mimeType: "image/jpeg", bytes: JPEG, ...(alt ? { alt } : {}) });
+	const { storageKey } = await mediaItem(runtime, id);
+	return { id, value: (extra: Partial<ImageValue> = {}) => ({ id, provider: "local", meta: { storageKey }, ...extra }) };
+}
+
+async function create(runtime: PluginRuntimeTestHost, data: Record<string, unknown>, locale: string, translationOf?: string) {
+	const created = await runtime.actions.content.create("albums", { data, locale, ...(translationOf ? { translationOf } : {}) });
 	if (!created.success) throw new Error(created.error.message);
 	return created.data.item;
 }
 
-/** New entries get their alt text after the save (content:afterSave), so wait for the plugin's log. */
-async function waitForLog(runtime: PluginRuntimeTestHost, count = 1) {
+async function logCount(runtime: PluginRuntimeTestHost) {
+	return (await runtime.inspect.storage.list("alt_log")).length;
+}
+
+/** after-save work runs after the request returns: wait for the plugin's log, or give it time when nothing is expected. */
+async function settle(runtime: PluginRuntimeTestHost, expectedLogs?: number) {
+	if (expectedLogs === undefined) {
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		return;
+	}
 	for (let attempt = 0; attempt < 60; attempt++) {
-		const entries = await runtime.inspect.storage.list("alt_log");
-		if (entries.length >= count) return entries;
+		if ((await logCount(runtime)) >= expectedLogs) return;
 		await new Promise((resolve) => setTimeout(resolve, 50));
 	}
-	throw new Error("the plugin never logged a result");
+	throw new Error(`expected ${expectedLogs} log entries`);
 }
 
-async function publishedData(runtime: PluginRuntimeTestHost, id: string) {
-	const published = await runtime.actions.content.publish("albums", id, {});
-	if (!published.success) throw new Error(published.error.message);
-	return published.data.item.data as Record<string, unknown>;
+async function published(runtime: PluginRuntimeTestHost, id: string) {
+	const result = await runtime.actions.content.publish("albums", id, {});
+	if (!result.success) throw new Error(result.error.message);
+	return result.data.item.data as { cover?: ImageValue; title?: string };
 }
 
-function sentBodies(runtime: PluginRuntimeTestHost) {
+function sent(runtime: PluginRuntimeTestHost): SentRequest[] {
 	return runtime.http.requests().map((request) => ({
 		apiKey: request.headers["x-api-key"],
-		body: JSON.parse(new TextDecoder().decode(request.body)) as {
-			model: string;
-			messages: Array<{ content: Array<{ type: string; text?: string; source?: { url: string } }> }>;
-		},
+		body: JSON.parse(new TextDecoder().decode(request.body)) as SentRequest["body"],
 	}));
 }
 
-describe("new entries (content:afterSave)", () => {
-	it("writes alt text in the entry's language, ready once published", async () => {
+const promptOf = (request: SentRequest) => request.body.messages[0]!.content[1]!.text ?? "";
+
+describe("media library", () => {
+	it("describes a new image on upload, in the site language, from its bytes", async () => {
 		const runtime = await setup();
-		await runtime.http.respond(API, claudeSays("Pochette de l’album Decimate, fond rouge"));
+		await runtime.http.respond(API, claudeSays("Pochette de l’album Decimate, fond turquoise"));
 
-		const item = await create(runtime, { title: "Decimate", cover: image("decimate.jpg") }, "fr");
-		await waitForLog(runtime);
+		const upload = await runtime.actions.media.upload({ filename: "decimate.jpg", contentType: "image/jpeg", base64: "/9j/4AAQSkZJRgABAQ==" });
+		if (!upload.success) throw new Error(upload.error.message);
 
-		const data = await publishedData(runtime, item.id);
-		expect((data.cover as ImageValue).alt).toBe("Pochette de l’album Decimate, fond rouge");
-		const [request, ...others] = sentBodies(runtime);
-		expect(others).toEqual([]);
+		expect((await mediaItem(runtime, upload.data.item.id)).alt).toBe("Pochette de l’album Decimate, fond turquoise");
+		const [request] = sent(runtime);
 		expect(request!.apiKey).toBe(API_KEY);
-		expect(request!.body.model).toBe("claude-haiku-4-5");
-		expect(request!.body.messages[0]!.content[0]!.source!.url).toBe("https://example.com/_emdash/api/media/file/decimate.jpg");
-		expect(request!.body.messages[0]!.content[1]!.text).toContain("French");
+		expect(request!.body.messages[0]!.content[0]!.source!.type).toBe("base64");
+		expect(promptOf(request!)).toContain("French");
+		expect(promptOf(request!)).toContain("decimate.jpg");
 	});
+});
 
-	it("uses the language of English entries and the chosen model", async () => {
-		const runtime = await setup({ apiKey: API_KEY, model: "claude-sonnet-5-5" });
-		await runtime.http.respond(API, claudeSays("Red album cover"));
-
-		await create(runtime, { title: "Decimate", cover: image("decimate.jpg") }, "en");
-		await waitForLog(runtime);
-
-		const [request] = sentBodies(runtime);
-		expect(request!.body.model).toBe("claude-sonnet-5-5");
-		expect(request!.body.messages[0]!.content[1]!.text).toContain("English");
-	});
-
-	it("keeps alt text written by people and only fills the missing one", async () => {
+describe("entries in the media library language", () => {
+	it("inherit the media library alt text without calling Claude", async () => {
 		const runtime = await setup();
-		await runtime.http.respond(API, claudeSays("Verso de la pochette"));
+		const image = await libraryImage(runtime, "decimate.jpg", "Pochette de Decimate");
 
-		const item = await create(runtime, {
-			title: "Decimate",
-			cover: image("front.jpg", "Texte écrit à la main"),
-			back: image("back.jpg"),
+		const item = await create(runtime, { title: "Decimate", cover: image.value() }, "fr");
+		await settle(runtime);
+
+		expect(runtime.http.requests()).toEqual([]);
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Pochette de Decimate");
+	});
+
+	it("get a description, stored in the media library too, when the image has none", async () => {
+		const runtime = await setup();
+		const image = await libraryImage(runtime, "decimate.jpg");
+		await runtime.http.respond(API, claudeSays("Pochette de Decimate, portrait sur fond turquoise"));
+
+		const item = await create(runtime, { title: "Decimate", cover: image.value() }, "fr");
+		await settle(runtime, 1);
+
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Pochette de Decimate, portrait sur fond turquoise");
+		expect((await mediaItem(runtime, image.id)).alt).toBe("Pochette de Decimate, portrait sur fond turquoise");
+		const [request] = sent(runtime);
+		expect(request!.body.messages[0]!.content[0]!.source).toEqual({
+			type: "url",
+			url: `https://example.com/_emdash/api/media/file/${(await mediaItem(runtime, image.id)).storageKey}`,
 		});
-		await waitForLog(runtime);
-
-		const data = await publishedData(runtime, item.id);
-		expect((data.cover as ImageValue).alt).toBe("Texte écrit à la main");
-		expect((data.back as ImageValue).alt).toBe("Verso de la pochette");
-		expect(runtime.http.requests()).toHaveLength(1);
 	});
 
-	it("leaves the entry untouched when Claude fails", async () => {
+	it("get a description during the save when an existing entry gets an image without alt text", async () => {
+		const runtime = await setup({ model: "claude-haiku-4-5" });
+		const item = await create(runtime, { title: "Decimate" }, "fr");
+		await settle(runtime);
+		await configure(runtime, { apiKey: API_KEY });
+		const image = await libraryImage(runtime, "new.jpg");
+		await runtime.http.respond(API, claudeSays("Nouvelle pochette"));
+
+		const updated = await runtime.actions.content.update("albums", item.id, { data: { title: "Decimate", cover: image.value() } });
+		if (!updated.success) throw new Error(updated.error.message);
+
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Nouvelle pochette");
+		expect((await mediaItem(runtime, image.id)).alt).toBe("Nouvelle pochette");
+	});
+});
+
+describe("entries in another language", () => {
+	it("get alt text in their language instead of the inherited one, without touching the media library", async () => {
 		const runtime = await setup();
+		const image = await libraryImage(runtime, "decimate.jpg", "Pochette de Decimate");
+		await runtime.http.respond(API, claudeSays("Decimate cover, portrait on a turquoise background"));
+
+		const item = await create(runtime, { title: "Decimate", cover: image.value() }, "en");
+		await settle(runtime, 1);
+
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Decimate cover, portrait on a turquoise background");
+		expect((await mediaItem(runtime, image.id)).alt).toBe("Pochette de Decimate");
+		expect(promptOf(sent(runtime)[0]!)).toContain("English");
+	});
+
+	it("replace alt text copied from the entry they translate", async () => {
+		const runtime = await setup({ model: "claude-haiku-4-5" });
+		const image = await libraryImage(runtime, "decimate.jpg", "Pochette de Decimate");
+		const french = await create(runtime, { title: "Decimate", cover: image.value({ alt: "Maeta sur la pochette de Decimate" }) }, "fr");
+		await settle(runtime);
+		await configure(runtime, { apiKey: API_KEY });
+		await runtime.http.respond(API, claudeSays("Maeta on the Decimate cover"));
+
+		const english = await create(runtime, { title: "Decimate", cover: image.value({ alt: "Maeta sur la pochette de Decimate" }) }, "en", french.id);
+		await settle(runtime, 1);
+
+		expect((await published(runtime, english.id)).cover?.alt).toBe("Maeta on the Decimate cover");
+	});
+
+	it("keep alt text a person wrote for them", async () => {
+		const runtime = await setup();
+		const image = await libraryImage(runtime, "decimate.jpg", "Pochette de Decimate");
+
+		const item = await create(runtime, { title: "Decimate", cover: image.value({ alt: "Hand-written English alt text" }) }, "en");
+		await settle(runtime);
+
+		expect(runtime.http.requests()).toEqual([]);
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Hand-written English alt text");
+	});
+});
+
+describe("safety", () => {
+	it("saves the entry anyway when Claude fails", async () => {
+		const runtime = await setup();
+		const image = await libraryImage(runtime, "decimate.jpg");
 		await runtime.http.respond(API, claudeSays("Overloaded", 529));
 
-		const item = await create(runtime, { title: "Decimate", cover: image("decimate.jpg") });
-		const [entry] = await waitForLog(runtime);
-		expect(entry!.data).toMatchObject({ status: "error", field: "cover" });
+		const item = await create(runtime, { title: "Decimate", cover: image.value() }, "fr");
+		await settle(runtime, 1);
 
-		const data = await publishedData(runtime, item.id);
+		const [entry] = await runtime.inspect.storage.list("alt_log");
+		expect(entry!.data).toMatchObject({ status: "error" });
+		const data = await published(runtime, item.id);
 		expect(data.title).toBe("Decimate");
-		expect((data.cover as ImageValue).alt).toBeUndefined();
-	});
-
-	it("respects the per-save limit", async () => {
-		const runtime = await setup({ apiKey: API_KEY, maxPerSave: 1 });
-		await runtime.http.respond(API, claudeSays("Recto"));
-
-		const item = await create(runtime, { title: "Decimate", cover: image("front.jpg"), back: image("back.jpg") });
-		await waitForLog(runtime);
-
-		expect(runtime.http.requests()).toHaveLength(1);
-		const data = await publishedData(runtime, item.id);
-		expect([(data.cover as ImageValue).alt, (data.back as ImageValue).alt].filter(Boolean)).toEqual(["Recto"]);
+		expect(data.cover?.alt).toBeUndefined();
+		expect((await mediaItem(runtime, image.id)).alt ?? null).toBeNull();
 	});
 
 	it("does nothing without an API key", async () => {
 		const runtime = await setup({ model: "claude-haiku-4-5" });
-		await create(runtime, { title: "Decimate", cover: image("decimate.jpg") });
-		await new Promise((resolve) => setTimeout(resolve, 300));
+		const image = await libraryImage(runtime, "decimate.jpg");
+		await create(runtime, { title: "Decimate", cover: image.value() }, "en");
+		await settle(runtime);
 		expect(runtime.http.requests()).toEqual([]);
-		await expect(runtime.inspect.storage.list("alt_log")).resolves.toEqual([]);
-	});
-});
-
-describe("existing entries (content:beforeSave)", () => {
-	it("fills missing alt text during the save, in the entry's language", async () => {
-		const runtime = await setup({ model: "claude-haiku-4-5" });
-		const item = await create(runtime, { title: "Decimate", cover: image("decimate.jpg") }, "en");
-		// Let the creation's afterSave hook finish (it ran without a key) before adding one.
-		await new Promise((resolve) => setTimeout(resolve, 300));
-		await configure(runtime, { apiKey: API_KEY });
-		await runtime.http.respond(API, claudeSays("Red album cover"));
-
-		const updated = await runtime.actions.content.update("albums", item.id, {
-			data: { title: "Decimate (deluxe)", cover: image("decimate.jpg") },
-		});
-		if (!updated.success) throw new Error(updated.error.message);
-
-		const data = await publishedData(runtime, item.id);
-		expect(data.title).toBe("Decimate (deluxe)");
-		expect((data.cover as ImageValue).alt).toBe("Red album cover");
-		expect(runtime.http.requests()).toHaveLength(1);
-		expect(sentBodies(runtime)[0]!.body.messages[0]!.content[1]!.text).toContain("English");
+		expect(await logCount(runtime)).toBe(0);
 	});
 
 	it("stores the API key encrypted", async () => {
 		const runtime = await setup();
-		const raw = await runtime.inspect.settings.raw<unknown>("apiKey");
-		expect(JSON.stringify(raw)).not.toContain(API_KEY);
+		expect(JSON.stringify(await runtime.inspect.settings.raw<unknown>("apiKey"))).not.toContain(API_KEY);
 	});
 });
 
 describe("admin", () => {
-	it("warns when the API key is missing and offers collections to scan", async () => {
+	it("warns without a key and offers the media library and collections", async () => {
 		const runtime = await setup({ model: "claude-haiku-4-5" });
 		const page = await runtime.admin.loadPage("/audit");
 		expect(page.blocks).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ type: "banner", title: "No Anthropic API key" }),
-				expect.objectContaining({
-					type: "actions",
-					elements: [expect.objectContaining({ action_id: "scan", label: "Albums", value: "albums|" })],
-				}),
+				expect.objectContaining({ type: "section", accessory: expect.objectContaining({ action_id: "media-scan" }) }),
+				expect.objectContaining({ type: "actions", elements: [expect.objectContaining({ action_id: "scan", value: "albums|" })] }),
 			]),
 		);
 	});
 
-	it("lists entries with missing alt text and writes it from the admin", async () => {
-		const runtime = await setup({ apiKey: API_KEY, autoGenerate: false });
-		const item = await create(runtime, { title: "Decimate", cover: image("decimate.jpg") });
-		await create(runtime, { title: "Done", cover: image("done.jpg", "Déjà décrite") });
+	it("lists media library images without alt text and describes them", async () => {
+		const runtime = await setup({ apiKey: API_KEY, onUpload: false });
+		const image = await libraryImage(runtime, "no-alt.jpg");
+		await libraryImage(runtime, "has-alt.jpg", "Déjà décrite");
+
+		const scan = await runtime.admin.act("/audit", "media-scan", { value: "" });
+		const table = scan.blocks.find((block) => block.type === "table") as unknown as { rows: Array<{ file: string; action: { value: unknown } }> };
+		expect(table.rows.map((row) => row.file)).toEqual(["no-alt.jpg"]);
+
+		await runtime.http.respond(API, claudeSays("Une image décrite"));
+		const done = await runtime.admin.act("/audit", "media-describe", { value: table.rows[0]!.action.value });
+		expect(done.blocks).toEqual(expect.arrayContaining([expect.objectContaining({ type: "fields", fields: [expect.objectContaining({ value: "Une image décrite" })] })]));
+		expect((await mediaItem(runtime, image.id)).alt).toBe("Une image décrite");
+	});
+
+	it("completes an entry in another language from the admin", async () => {
+		const runtime = await setup({ apiKey: API_KEY, onSave: false });
+		const image = await libraryImage(runtime, "decimate.jpg", "Pochette de Decimate");
+		// As stored in production: EmDash copied the media library (French) alt text into the field.
+		const item = await create(runtime, { title: "Decimate", cover: image.value({ alt: "Pochette de Decimate" }) }, "en");
+		await settle(runtime);
 
 		const scan = await runtime.admin.act("/audit", "scan", { value: "albums|" });
 		const table = scan.blocks.find((block) => block.type === "table") as unknown as {
-			rows: Array<{ entry: string; fields: string; action: { value: string } }>;
+			rows: Array<{ entry: string; locale: string; alt: string; action: { value: string } }>;
 		};
-		expect(table.rows).toEqual([expect.objectContaining({ entry: "Decimate", fields: "cover" })]);
+		expect(table.rows).toEqual([expect.objectContaining({ entry: "Decimate", locale: "en", alt: "Pochette de Decimate" })]);
 
-		await runtime.http.respond(API, claudeSays("Pochette rouge de Decimate"));
-		const done = await runtime.admin.act("/audit", "generate", { value: table.rows[0]!.action.value });
-		expect(done.blocks).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ type: "fields", fields: [{ label: "cover", value: "Pochette rouge de Decimate" }] }),
-				expect.objectContaining({ type: "banner", title: "Alt text saved" }),
-			]),
-		);
-		const data = await publishedData(runtime, item.id);
-		expect((data.cover as ImageValue).alt).toBe("Pochette rouge de Decimate");
+		await runtime.http.respond(API, claudeSays("Decimate cover"));
+		await runtime.admin.act("/audit", "complete", { value: table.rows[0]!.action.value });
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Decimate cover");
 	});
 
 	it("shows recent activity in the dashboard widget", async () => {
 		const runtime = await setup();
-		const empty = await runtime.admin.loadWidget("activity");
-		expect(empty.blocks).toEqual([expect.objectContaining({ type: "empty" })]);
+		expect((await runtime.admin.loadWidget("activity")).blocks).toEqual([expect.objectContaining({ type: "empty" })]);
 
+		const image = await libraryImage(runtime, "decimate.jpg");
 		await runtime.http.respond(API, claudeSays("Pochette rouge"));
-		await create(runtime, { title: "Decimate", cover: image("decimate.jpg") });
-		await waitForLog(runtime);
-		const widget = await runtime.admin.loadWidget("activity");
-		expect(widget.blocks).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ type: "stats", items: expect.arrayContaining([expect.objectContaining({ value: 1 })]) }),
-			]),
+		await create(runtime, { title: "Decimate", cover: image.value() }, "fr");
+		await settle(runtime, 1);
+
+		expect((await runtime.admin.loadWidget("activity")).blocks).toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "stats", items: expect.arrayContaining([expect.objectContaining({ value: 1 })]) })]),
 		);
 	});
 });
