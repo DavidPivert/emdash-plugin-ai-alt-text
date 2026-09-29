@@ -8,7 +8,7 @@
 	"license": "MIT",
 	"author": { "name": "La Symphonie", "url": "https://lasymphonieagency.com" },
 	"security": { "email": "contact@lasymphonieagency.com" },
-	"description": "Writes alt text for images with Claude when content is saved, and lists images still missing one.",
+	"description": "Writes alt text for images with Claude, in each entry's language, building on your media library.",
 	"keywords": ["accessibility", "alt text", "images", "ai", "wcag"],
 	"repo": "https://github.com/DavidPivert/emdash-plugin-ai-alt-text",
 

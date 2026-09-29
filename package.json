@@ -37,7 +37,7 @@
 		"typescript": "^5.9.0",
 		"vitest": "^4.1.0"
 	},
-	"description": "Writes alt text for images with Claude when content is saved, and lists images still missing one.",
+	"description": "Writes alt text for images with Claude, in each entry's language, building on your media library.",
 	"license": "MIT",
 	"author": "La Symphonie (https://lasymphonieagency.com)",
 	"repository": {
