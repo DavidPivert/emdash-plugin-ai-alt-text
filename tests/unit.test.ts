@@ -109,6 +109,14 @@ describe("Claude response", () => {
 		const long = cleanAlt(`${"mot ".repeat(60)}fin`);
 		expect(Array.from(long).length).toBeLessThanOrEqual(125);
 		expect(long.endsWith(" ")).toBe(false);
+		// Cut on a word, without a dangling "and".
+		expect(
+			cleanAlt("Music production studio with two people working at keyboards and equipment under industrial ceiling with hanging cables and lamps"),
+		).toBe("Music production studio with two people working at keyboards and equipment under industrial ceiling with hanging cables");
+		// Cut on a clause when one ends past half the length.
+		expect(
+			cleanAlt("Studio de production musical avec deux personnes aux claviers et aux machines, sous un plafond industriel où pendent des câbles et des lampes"),
+		).toBe("Studio de production musical avec deux personnes aux claviers et aux machines");
 	});
 });
 

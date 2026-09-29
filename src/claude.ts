@@ -20,7 +20,7 @@ export function resolveModel(value: unknown): Model {
 
 const SYSTEM_PROMPT = [
 	"You write alternative text (the HTML alt attribute) for images on a website, for people who use screen readers.",
-	`Describe what the image shows in one short, factual sentence of at most ${MAX_ALT_LENGTH} characters.`,
+	"Describe what the image shows in one short, factual sentence of about 100 characters, never more than 120.",
 	'Do not start with "Image of", "Photo of", "Picture of" or their equivalent in the requested language.',
 	"Do not identify real people by name.",
 	"Reply with the alt text only, without quotes.",
@@ -82,12 +82,21 @@ export function buildRequest(input: AltRequest): { headers: Record<string, strin
 	return { headers, body };
 }
 
+const DANGLING =
+	/[\s,;:–—-]+(and|or|with|of|the|a|an|in|on|at|to|for|by|from|et|ou|avec|de|du|des|la|le|les|un|une|à|au|aux|en|sur|dans|pour|par|y|con|del|el|und|mit|der|die|das)$/i;
+
 export function cleanAlt(raw: string): string {
 	let alt = raw.trim().replace(/\s+/g, " ");
 	alt = alt.replace(/^(alt(\s*text)?\s*:\s*)/i, "").trim();
 	alt = alt.replace(/^["'«»“”‘’\s]+|["'«»“”‘’\s]+$/g, "").trim();
 	if (Array.from(alt).length > MAX_ALT_LENGTH) {
-		alt = Array.from(alt).slice(0, MAX_ALT_LENGTH).join("").replace(/\s+\S*$/, "").trim();
+		const cut = Array.from(alt).slice(0, MAX_ALT_LENGTH).join("");
+		// Prefer ending on a clause (comma, semicolon, dash) over a dangling word.
+		const clause = Math.max(cut.lastIndexOf(", "), cut.lastIndexOf("; "), cut.lastIndexOf(" – "), cut.lastIndexOf(" — "));
+		alt = clause >= MAX_ALT_LENGTH * 0.5 ? cut.slice(0, clause) : cut.replace(/\s+\S*$/, "");
+		// Never end on a dangling linking word ("…cables and", "…câbles et").
+		for (let i = 0; i < 3 && DANGLING.test(alt); i++) alt = alt.replace(DANGLING, "");
+		alt = alt.replace(/[\s,;:–—-]+$/, "").trim();
 	}
 	return alt;
 }
