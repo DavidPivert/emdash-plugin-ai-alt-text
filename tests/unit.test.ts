@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildRequest, cleanAlt, languageName, parseResponse, resolveModel } from "../src/claude";
-import { decide } from "../src/entries";
+import { decide, referenceFor } from "../src/entries";
 import { findMediaFields, isPrivateUrl, isSupportedImage, publicImageUrl, sameLanguage, valueAtPath } from "../src/media";
 
 describe("media helpers", () => {
@@ -59,6 +59,20 @@ describe("Claude request", () => {
 		expect(content[0]).toEqual({ type: "image", source: { type: "url", url: "https://example.com/a.jpg" } });
 		expect(content[1]!.text).toContain("French (fr)");
 		expect(content[1]!.text).toContain('"Decimate"');
+	});
+
+	it("translates existing alt text when given one, checking it against the image", () => {
+		const { body } = buildRequest({
+			...base,
+			locale: "en",
+			model: "claude-haiku-4-5",
+			reference: { text: "Pochette du single Decimate : portrait de Maeta", locale: "fr" },
+		});
+		const text = (body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]!.content[1]!.text as string;
+		expect(text).toContain("Translate this alt text from French (fr) into English (en)");
+		expect(text).toContain("<alt>Pochette du single Decimate : portrait de Maeta</alt>");
+		expect(text).toContain("Check it against the image");
+		expect(body.system).toContain("keep a name only when the alt text you are given already contains it");
 	});
 
 	it("gives thinking models room, low effort and refusal fallbacks", () => {
@@ -158,7 +172,9 @@ describe("decide", () => {
 	});
 
 	it("translates inherited or copied alt text in other languages", () => {
-		expect(decide({ ...other, phase: "after-save", fieldAlt: undefined })).toBe("translate");
+		expect(decide({ ...other, phase: "before-save", fieldAlt: undefined })).toBe("needs-media-alt");
+		expect(decide({ ...other, phase: "before-save", fieldAlt: undefined, mediaAlt: "Un chat" })).toBe("translate");
+		expect(decide({ ...other, phase: "after-save", fieldAlt: undefined, mediaAlt: null })).toBe("translate");
 		expect(decide({ ...other, phase: "after-save", fieldAlt: "Un chat" })).toBe("needs-media-alt");
 		expect(decide({ ...other, phase: "after-save", fieldAlt: " un  CHAT ", mediaAlt: "Un chat" })).toBe("translate");
 		expect(decide({ ...other, phase: "after-save", fieldAlt: "Un chat", mediaAlt: "Autre" })).toBe("needs-source-alt");
@@ -168,5 +184,25 @@ describe("decide", () => {
 	it("keeps alt text a person wrote for the entry", () => {
 		expect(decide({ ...other, phase: "after-save", fieldAlt: "A cat", mediaAlt: "Un chat", sourceAlt: null })).toBe("skip");
 		expect(decide({ ...other, phase: "after-save", fieldAlt: "A cat", mediaAlt: null, sourceAlt: "Un chat" })).toBe("skip");
+	});
+});
+
+describe("referenceFor", () => {
+	const other = { sameLanguage: false, phase: "after-save" } as const;
+
+	it("starts from the media library text, inherited or about to be", () => {
+		expect(referenceFor({ ...other, fieldAlt: undefined, mediaAlt: "Un chat" }, "fr", "fr")).toEqual({ text: "Un chat", locale: "fr" });
+		expect(referenceFor({ ...other, fieldAlt: "Un chat ", mediaAlt: "un chat" }, "fr", "de")).toEqual({ text: "Un chat", locale: "fr" });
+	});
+
+	it("starts from the translated entry's text, in that entry's language", () => {
+		expect(referenceFor({ ...other, fieldAlt: "Eine Katze", mediaAlt: "Un chat", sourceAlt: "Eine Katze" }, "fr", "de")).toEqual({
+			text: "Eine Katze",
+			locale: "de",
+		});
+	});
+
+	it("has nothing to start from when the image has no alt text", () => {
+		expect(referenceFor({ ...other, fieldAlt: undefined, mediaAlt: null }, "fr", "fr")).toBeUndefined();
 	});
 });

@@ -202,7 +202,7 @@ function resultBlocks(blocks: Block[], log: AltLogEntry[], back: Block): { block
 		blocks.push({
 			type: "fields",
 			fields: written.map((entry) => ({
-				label: `${entry.field}${entry.target === "media" ? " (media library)" : ""} · ${entry.locale}`,
+				label: `${entry.field}${entry.target === "media" ? " (media library)" : ""}${entry.from === "translation" ? " (translated)" : ""} · ${entry.locale}`,
 				value: entry.alt,
 			})),
 		});

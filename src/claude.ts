@@ -20,19 +20,32 @@ export function resolveModel(value: unknown): Model {
 
 const SYSTEM_PROMPT = [
 	"You write alternative text (the HTML alt attribute) for images on a website, for people who use screen readers.",
-	"Describe what the image shows in one short, factual sentence of about 100 characters, never more than 120.",
+	"Write one short, factual sentence of about 100 characters, never more than 120.",
 	'Do not start with "Image of", "Photo of", "Picture of" or their equivalent in the requested language.',
-	"Do not identify real people by name.",
+	"Never identify a person from their appearance; keep a name only when the alt text you are given already contains it.",
 	"Reply with the alt text only, without quotes.",
 ].join(" ");
 
 export type ImageSource = { type: "url"; url: string };
+
+/** Alt text the site already has for this image, in another language. */
+export interface Reference {
+	text: string;
+	/** BCP 47 tag of the reference's language. */
+	locale: string;
+}
 
 export interface AltRequest {
 	model: Model;
 	image: ImageSource;
 	/** BCP 47 tag of the language to write in, e.g. `fr` or `en-GB`. */
 	locale: string;
+	/**
+	 * When set, translate this text instead of describing the image from
+	 * scratch: a person wrote or checked it, and it names what the image alone
+	 * cannot (the release, the artist).
+	 */
+	reference?: Reference;
 	/** Optional context: the entry title and the field holding the image. */
 	entryTitle?: string;
 	field?: string;
@@ -53,6 +66,12 @@ export function buildRequest(input: AltRequest): { headers: Record<string, strin
 	const context = input.entryTitle
 		? ` It illustrates the entry "${input.entryTitle.slice(0, 200)}"${input.field ? ` (field "${input.field}")` : ""}.`
 		: "";
+	const language = languageName(input.locale);
+	const task = input.reference
+		? `Translate this alt text from ${languageName(input.reference.locale)} into ${language}: <alt>${input.reference.text.slice(0, 500)}</alt>` +
+			" Keep its meaning, the names it gives and its length. Check it against the image: correct only what is clearly wrong," +
+			` and add nothing it does not say.${context}`
+		: `Write the alt text for this image in ${language}.${context}`;
 	const body: Record<string, unknown> = {
 		model: input.model,
 		max_tokens: 300,
@@ -62,7 +81,7 @@ export function buildRequest(input: AltRequest): { headers: Record<string, strin
 				role: "user",
 				content: [
 					{ type: "image", source: input.image },
-					{ type: "text", text: `Write the alt text for this image in ${languageName(input.locale)}.${context}` },
+					{ type: "text", text: task },
 				],
 			},
 		],

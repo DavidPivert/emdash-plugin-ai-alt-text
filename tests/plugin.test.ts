@@ -144,20 +144,24 @@ describe("entries in the media library language", () => {
 });
 
 describe("entries in another language", () => {
-	it("get alt text in their language instead of the inherited one, without touching the media library", async () => {
+	it("get the media library alt text translated into their language, without touching the media library", async () => {
 		const runtime = await setup();
 		const image = await libraryImage(runtime, "decimate.jpg", "Pochette de Decimate");
-		await runtime.http.respond(API, claudeSays("Decimate cover, portrait on a turquoise background"));
+		await runtime.http.respond(API, claudeSays("Decimate cover"));
 
 		const item = await create(runtime, { title: "Decimate", cover: image.value() }, "en");
 		await settle(runtime, 1);
 
-		expect((await published(runtime, item.id)).cover?.alt).toBe("Decimate cover, portrait on a turquoise background");
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Decimate cover");
 		expect((await mediaItem(runtime, image.id)).alt).toBe("Pochette de Decimate");
-		expect(promptOf(sent(runtime)[0]!)).toContain("English");
+		const prompt = promptOf(sent(runtime)[0]!);
+		expect(prompt).toContain("Translate this alt text from French (fr) into English (en)");
+		expect(prompt).toContain("<alt>Pochette de Decimate</alt>");
+		const [entry] = await runtime.inspect.storage.list("alt_log");
+		expect(entry!.data).toMatchObject({ status: "generated", from: "translation", locale: "en" });
 	});
 
-	it("replace alt text copied from the entry they translate", async () => {
+	it("get the alt text of the entry they translate translated, when a person wrote one", async () => {
 		const runtime = await setup({ model: "claude-haiku-4-5" });
 		const image = await libraryImage(runtime, "decimate.jpg", "Pochette de Decimate");
 		const french = await create(runtime, { title: "Decimate", cover: image.value({ alt: "Maeta sur la pochette de Decimate" }) }, "fr");
@@ -169,6 +173,22 @@ describe("entries in another language", () => {
 		await settle(runtime, 1);
 
 		expect((await published(runtime, english.id)).cover?.alt).toBe("Maeta on the Decimate cover");
+		expect(promptOf(sent(runtime)[0]!)).toContain("<alt>Maeta sur la pochette de Decimate</alt>");
+	});
+
+	it("get a description in their language when the image has no alt text anywhere", async () => {
+		const runtime = await setup();
+		const image = await libraryImage(runtime, "decimate.jpg");
+		await runtime.http.respond(API, claudeSays("Portrait on a turquoise background"));
+
+		const item = await create(runtime, { title: "Decimate", cover: image.value() }, "en");
+		await settle(runtime, 1);
+
+		expect((await published(runtime, item.id)).cover?.alt).toBe("Portrait on a turquoise background");
+		expect((await mediaItem(runtime, image.id)).alt ?? null).toBeNull();
+		const prompt = promptOf(sent(runtime)[0]!);
+		expect(prompt).toContain("Write the alt text for this image in English (en)");
+		expect(prompt).not.toContain("<alt>");
 	});
 
 	it("keep alt text a person wrote for them", async () => {

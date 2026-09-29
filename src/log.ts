@@ -11,6 +11,8 @@ export interface AltLogEntry {
 	status: "generated" | "copied" | "skipped" | "error";
 	/** What was written: the media library item or the entry's field. */
 	target: "media" | "field";
+	/** How Claude wrote it: translating existing alt text, or describing the image. */
+	from?: "translation" | "description";
 	message?: string;
 	model: Model;
 	at: string;

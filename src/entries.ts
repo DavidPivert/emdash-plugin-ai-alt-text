@@ -1,6 +1,6 @@
 import type { PluginContext } from "emdash/plugin";
 
-import { requestAlt } from "./claude";
+import { type Reference, requestAlt } from "./claude";
 import type { AltLogEntry } from "./log";
 import { findMediaFields, isPrivateUrl, isSupportedImage, type MediaValue, publicImageUrl, sameLanguage, valueAtPath } from "./media";
 import type { Budget, Settings } from "./settings";
@@ -18,10 +18,11 @@ import type { Budget, Settings } from "./settings";
  *   entry inherits it) and to this field.
  * - `inherit`: the media library has alt text but the stored field is empty
  *   (the image got its alt text after the entry was saved): copy it.
- * - `translate`: the entry is in another language and its field holds the
- *   inherited text (from the media library, or copied from the entry it
- *   translates). Claude describes the image in the entry's language, for this
- *   field only.
+ * - `translate`: the entry is in another language and its field holds, or is
+ *   about to inherit, text in another language (from the media library, or
+ *   copied from the entry it translates). Claude translates that text into the
+ *   entry's language, checking it against the image, for this field only; with
+ *   no text to start from, it describes the image in the entry's language.
  *
  * Alt text a person wrote for this entry is never replaced.
  */
@@ -61,8 +62,9 @@ const normalized = (text: string | null | undefined) => (text ?? "").trim().repl
 export function decide(input: DecisionInput): Action | "needs-media-alt" | "needs-source-alt" {
 	const fieldAlt = input.fieldAlt?.trim();
 	if (!fieldAlt) {
-		if (!input.sameLanguage) return "translate";
+		// Other languages too: the media library text is what gets translated.
 		if (input.mediaAlt === undefined) return "needs-media-alt";
+		if (!input.sameLanguage) return "translate";
 		if (input.mediaAlt) return input.phase === "before-save" ? "skip" : "inherit";
 		return "describe";
 	}
@@ -72,6 +74,19 @@ export function decide(input: DecisionInput): Action | "needs-media-alt" | "need
 	if (input.sourceAlt === undefined) return "needs-source-alt";
 	if (input.sourceAlt && normalized(fieldAlt) === normalized(input.sourceAlt)) return "translate";
 	return "skip";
+}
+
+/**
+ * The text a translation starts from: the field's inherited text, or the media
+ * library text it is about to inherit. Its language is the media library's,
+ * unless it came from the entry this one translates.
+ */
+export function referenceFor(input: DecisionInput, mediaLanguage: string, sourceLocale: string): Reference | undefined {
+	const fieldAlt = input.fieldAlt?.trim();
+	const text = fieldAlt || input.mediaAlt?.trim();
+	if (!text) return undefined;
+	const fromSource = !!fieldAlt && normalized(fieldAlt) !== normalized(input.mediaAlt) && normalized(fieldAlt) === normalized(input.sourceAlt);
+	return { text, locale: fromSource ? sourceLocale : mediaLanguage };
 }
 
 export interface EntryResult {
@@ -94,6 +109,7 @@ export async function processEntry(
 	let changed = 0;
 	let remaining = 0;
 	let sourceData: Record<string, unknown> | null | undefined;
+	let sourceLocale = settings.mediaLanguage;
 
 	const mediaAlt = async (value: MediaValue): Promise<string | null> => {
 		if (value.provider !== "local" || !value.id || !ctx.media) return null;
@@ -107,7 +123,10 @@ export async function processEntry(
 			const siblings = (translations?.translations ?? []).filter((t) => t.id !== entry.id);
 			const source =
 				siblings.find((t) => t.locale && sameLanguage(t.locale, settings.mediaLanguage)) ?? siblings[0];
-			if (source && budget.take()) sourceData = (await ctx.content?.get(entry.collection, source.id))?.data ?? null;
+			if (source && budget.take()) {
+				sourceData = (await ctx.content?.get(entry.collection, source.id))?.data ?? null;
+				if (source.locale) sourceLocale = source.locale;
+			}
 		}
 		return (sourceData && valueAtPath(sourceData, field)?.alt?.trim()) || null;
 	};
@@ -148,26 +167,29 @@ export async function processEntry(
 		const writeMedia = action === "describe" && value.provider === "local" && !!value.id && !!ctx.media?.updateMetadata;
 		if (!budget.take(writeMedia ? 2 : 1)) { remaining++; continue; }
 		const locale = action === "describe" ? settings.mediaLanguage : entry.locale;
+		const reference = action === "translate" ? referenceFor(input, settings.mediaLanguage, sourceLocale) : undefined;
+		const from = reference ? "translation" : "description";
 		try {
 			const result = await requestAlt(ctx.http!, settings.apiKey!, {
 				model: settings.model,
 				image: { type: "url", url },
 				locale,
+				reference,
 				entryTitle: entry.title,
 				field,
 			});
 			if (!result.ok) {
-				log.push({ ...base, field, locale, alt: "", status: "error", target: "field", message: result.message });
+				log.push({ ...base, field, locale, alt: "", status: "error", target: "field", from, message: result.message });
 				ctx.log.warn("ai-alt-text: no alt text written", { collection: entry.collection, field, reason: result.message });
 				continue;
 			}
 			value.alt = result.alt;
 			changed++;
-			log.push({ ...base, field, locale, alt: result.alt, status: "generated", target: writeMedia ? "media" : "field" });
+			log.push({ ...base, field, locale, alt: result.alt, status: "generated", target: writeMedia ? "media" : "field", from });
 			if (writeMedia) await ctx.media!.updateMetadata!(value.id!, { alt: result.alt });
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			log.push({ ...base, field, locale, alt: "", status: "error", target: "field", message });
+			log.push({ ...base, field, locale, alt: "", status: "error", target: "field", from, message });
 			ctx.log.warn("ai-alt-text: no alt text written", { collection: entry.collection, field, reason: message });
 		}
 	}
