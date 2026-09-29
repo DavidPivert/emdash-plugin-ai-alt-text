@@ -3,9 +3,8 @@
  *
  * Sandboxed plugins reach the network only through `ctx.http.fetch`, which is
  * why this calls the HTTP API directly instead of using `@anthropic-ai/sdk`.
- * Images used in entries are passed by public URL (Anthropic downloads them,
- * no work in the sandbox). Media library items have no public URL for plugins,
- * so their bytes are sent instead, with a size cap (50 ms CPU per invocation).
+ * Images are passed by public URL: Anthropic downloads them, so nothing heavy
+ * runs in the sandbox (50 ms of CPU per invocation on Cloudflare).
  */
 
 export const API_URL = "https://api.anthropic.com/v1/messages";
@@ -27,9 +26,7 @@ const SYSTEM_PROMPT = [
 	"Reply with the alt text only, without quotes.",
 ].join(" ");
 
-export type ImageSource =
-	| { type: "url"; url: string }
-	| { type: "base64"; media_type: string; data: string };
+export type ImageSource = { type: "url"; url: string };
 
 export interface AltRequest {
 	model: Model;
@@ -39,8 +36,6 @@ export interface AltRequest {
 	/** Optional context: the entry title and the field holding the image. */
 	entryTitle?: string;
 	field?: string;
-	/** Optional context: the uploaded file name. */
-	filename?: string;
 }
 
 export function languageName(locale: string): string {
@@ -55,12 +50,9 @@ export function languageName(locale: string): string {
 }
 
 export function buildRequest(input: AltRequest): { headers: Record<string, string>; body: Record<string, unknown> } {
-	let context = "";
-	if (input.entryTitle) {
-		context = ` It illustrates the entry "${input.entryTitle.slice(0, 200)}"${input.field ? ` (field "${input.field}")` : ""}.`;
-	} else if (input.filename) {
-		context = ` The file is named "${input.filename.slice(0, 120)}", which may help but can be wrong.`;
-	}
+	const context = input.entryTitle
+		? ` It illustrates the entry "${input.entryTitle.slice(0, 200)}"${input.field ? ` (field "${input.field}")` : ""}.`
+		: "";
 	const body: Record<string, unknown> = {
 		model: input.model,
 		max_tokens: 300,

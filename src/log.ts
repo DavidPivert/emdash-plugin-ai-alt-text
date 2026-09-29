@@ -3,7 +3,6 @@ import type { PluginContext } from "emdash/plugin";
 import type { Model } from "./claude";
 
 export interface AltLogEntry {
-	/** `media` for the media library, otherwise the collection slug. */
 	collection: string;
 	contentId: string;
 	field: string;

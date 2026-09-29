@@ -24,8 +24,7 @@
 	//  - content:write        — required by content:beforeSave; saves alt text into entries.
 	//  - content:read         — reads entries, their language and the entry they translate.
 	//  - schema:read          — finds collections that have image fields.
-	//  - media:read           — required by media:afterUpload; reads media library alt text.
-	//  - media:bytes:read     — reads images that have no public URL (media library, up to 3 MB).
+	//  - media:read           — reads the media library alt text an image field inherits.
 	//  - media:metadata:write — saves alt text on media library items (alt, caption, focal point only).
 	//  - network:request      — calls the Claude API (only api.anthropic.com).
 	"capabilities": [
@@ -33,7 +32,6 @@
 		"content:write",
 		"schema:read",
 		"media:read",
-		"media:bytes:read",
 		"media:metadata:write",
 		"network:request"
 	],
@@ -54,7 +52,7 @@
 			"model": {
 				"type": "select",
 				"label": "Claude model",
-				"description": "Haiku is fast enough to run during uploads and saves. Sonnet and Opus write richer descriptions but take longer.",
+				"description": "Haiku is fast enough to run during saves. Sonnet and Opus write richer descriptions but take longer.",
 				"options": [
 					{ "value": "claude-haiku-4-5", "label": "Claude Haiku 4.5 (fast, recommended)" },
 					{ "value": "claude-sonnet-5-5", "label": "Claude Sonnet 5.5" },
@@ -66,12 +64,6 @@
 				"type": "string",
 				"label": "Media library language",
 				"description": "Language tag of the alt text stored in the media library, which entries in that language inherit (for example fr or en). Empty means the site language."
-			},
-			"onUpload": {
-				"type": "boolean",
-				"label": "Describe new images on upload",
-				"description": "Writes alt text on the media library item. An upload is never blocked.",
-				"default": true
 			},
 			"onSave": {
 				"type": "boolean",

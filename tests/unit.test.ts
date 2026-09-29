@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildRequest, cleanAlt, languageName, parseResponse, resolveModel } from "../src/claude";
 import { decide } from "../src/entries";
-import { bytesToBase64, findMediaFields, isPrivateUrl, isSupportedImage, publicImageUrl, sameLanguage, valueAtPath } from "../src/media";
+import { findMediaFields, isPrivateUrl, isSupportedImage, publicImageUrl, sameLanguage, valueAtPath } from "../src/media";
 
 describe("media helpers", () => {
 	const cover = { id: "m1", src: "/_emdash/api/media/file/a.jpg", meta: { storageKey: "a.jpg" } };
@@ -120,10 +120,6 @@ describe("language and path helpers", () => {
 		expect(sameLanguage("", "")).toBe(false);
 	});
 
-	it("encodes bytes to base64", () => {
-		expect(bytesToBase64(new Uint8Array([0, 255, 104, 105]))).toBe("AP9oaQ==");
-	});
-
 	it("reads image values by field path", () => {
 		const img = { id: "m", meta: { storageKey: "k.jpg" }, alt: "x" };
 		expect(valueAtPath({ cover: img }, "cover")).toBe(img);
@@ -131,12 +127,6 @@ describe("language and path helpers", () => {
 		expect(valueAtPath({ cover: "text" }, "cover")).toBeUndefined();
 	});
 
-	it("gives Claude the file name as context for media library images", () => {
-		const { body } = buildRequest({ model: "claude-haiku-4-5", image: { type: "base64", media_type: "image/jpeg", data: "AA==" }, locale: "fr", filename: "maeta-decimate-cover.jpg" });
-		const content = (body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]!.content;
-		expect(content[0]).toEqual({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: "AA==" } });
-		expect(content[1]!.text).toContain("maeta-decimate-cover.jpg");
-	});
 });
 
 describe("decide", () => {

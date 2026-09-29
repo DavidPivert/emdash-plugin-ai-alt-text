@@ -1,14 +1,13 @@
-import type { MediaItem, PluginContext } from "emdash/plugin";
+import type { PluginContext } from "emdash/plugin";
 
 import { processEntry } from "./entries";
-import { CALLS_PER_MEDIA_ITEM, describeMediaItem, MAX_MEDIA_BYTES, needsAlt } from "./library";
 import { type AltLogEntry, saveLog } from "./log";
 import { findMediaFields, sameLanguage } from "./media";
 import { Budget, coversCollection, HOST_CALLS_PER_INVOCATION, readSettings, type Settings } from "./settings";
 
 /**
  * Block Kit admin surfaces. Every interaction stays within 10 host calls, so
- * lists are paginated and bulk actions handle two images at a time.
+ * lists are paginated and one entry is completed per click.
  */
 
 type Block = Record<string, unknown>;
@@ -18,10 +17,8 @@ interface Interaction {
 	action_id?: string;
 	value?: unknown;
 }
-type MediaRef = Pick<MediaItem, "id" | "filename" | "mimeType" | "size">;
 
 const PAGE_SIZE = 50;
-const BULK_MEDIA = 2;
 const SEP = "|";
 
 export function entryTitle(data: Record<string, unknown>): string | undefined {
@@ -37,10 +34,6 @@ export async function handleAdmin(input: unknown, ctx: PluginContext): Promise<{
 	const action = interaction.type === "block_action" ? interaction.action_id : undefined;
 	const value = interaction.value;
 	switch (action) {
-		case "media-scan":
-			return { blocks: await mediaScan(ctx, settings, typeof value === "string" && value ? value : undefined) };
-		case "media-describe":
-			return describeMedia(ctx, settings, Array.isArray(value) ? (value as MediaRef[]) : []);
 		case "scan":
 		case "scan-page": {
 			const [collection = "", cursor] = String(value ?? "").split(SEP);
@@ -81,7 +74,6 @@ function header(settings: Settings): Block[] {
 				label: "Media library language",
 				value: settings.mediaLanguageFrom === "setting" ? settings.mediaLanguage : `${settings.mediaLanguage} (site language from EmDash settings)`,
 			},
-			{ label: "New images", value: settings.onUpload ? "Described on upload" : "Off" },
 			{ label: "Saving entries", value: settings.onSave ? "Completes missing and translated alt text" : "Off" },
 		],
 	});
@@ -96,13 +88,7 @@ async function overview(ctx: PluginContext, settings: Settings): Promise<Block[]
 		{ type: "divider" },
 		{
 			type: "section",
-			text: "Media library: entries inherit the alt text of their images from here.",
-			accessory: { type: "button", action_id: "media-scan", label: "Find images without alt text", value: "" },
-		},
-		{ type: "divider" },
-		{
-			type: "section",
-			text: `Entries: entries in "${settings.mediaLanguage}" inherit the media library alt text. Check entries in other languages to give their images alt text in their own language.`,
+			text: `Entries in "${settings.mediaLanguage}" inherit the alt text of their images from the media library. Entries in other languages get alt text in their own language when they are saved; to catch up on existing ones, check a collection:`,
 		},
 	);
 	const collections = ((await ctx.schema?.listCollections()) ?? []).filter(
@@ -117,68 +103,6 @@ async function overview(ctx: PluginContext, settings: Settings): Promise<Block[]
 		});
 	}
 	return blocks;
-}
-
-async function mediaScan(ctx: PluginContext, settings: Settings, cursor?: string): Promise<Block[]> {
-	const blocks = header(settings);
-	if (!ctx.media) return [...blocks, { type: "banner", variant: "error", title: "Media access unavailable" }];
-	const page = await ctx.media.list({ limit: PAGE_SIZE, cursor });
-	const missing = page.items.filter(needsAlt);
-	const refs: MediaRef[] = missing.map(({ id, filename, mimeType, size }) => ({ id, filename, mimeType, size }));
-	blocks.push({
-		type: "section",
-		text: `${missing.length} image(s) without alt text in this page of ${page.items.length} media item(s). Images over ${Math.round(MAX_MEDIA_BYTES / 1024 / 1024)} MB are described when an entry uses them.`,
-		accessory: backButton,
-	});
-	if (refs.length > 0) {
-		blocks.push({
-			type: "actions",
-			elements: [
-				{
-					type: "button",
-					action_id: "media-describe",
-					label: `Describe the first ${Math.min(BULK_MEDIA, refs.length)}`,
-					style: "primary",
-					value: refs.slice(0, BULK_MEDIA),
-				},
-			],
-		});
-	}
-	blocks.push({
-		type: "table",
-		columns: [
-			{ key: "file", label: "File" },
-			{ key: "size", label: "Size" },
-			{ key: "action", label: "", format: "element" },
-		],
-		rows: refs.map((ref) => ({
-			file: ref.filename,
-			size: ref.size === null ? "—" : `${Math.round(ref.size / 1024)} KB`,
-			action: { type: "button", action_id: "media-describe", label: "Describe", value: [ref] },
-		})),
-		page_action_id: "media-scan",
-		...(page.hasMore && page.cursor ? { next_cursor: page.cursor } : {}),
-		empty_text: "Every image in this page has alt text.",
-	});
-	return blocks;
-}
-
-async function describeMedia(
-	ctx: PluginContext,
-	settings: Settings,
-	refs: MediaRef[],
-): Promise<{ blocks: Block[]; toast?: Record<string, string> }> {
-	const blocks = header(settings);
-	if (!settings.apiKey) return { blocks, toast: { type: "error", message: "Add an Anthropic API key first" } };
-	// settings (2) + log (1) reserved.
-	const budget = new Budget(HOST_CALLS_PER_INVOCATION - 3);
-	const log: AltLogEntry[] = [];
-	for (const ref of refs.slice(0, BULK_MEDIA)) {
-		if (budget.left < CALLS_PER_MEDIA_ITEM) break;
-		log.push(await describeMediaItem(ctx, settings, { ...ref, url: "", createdAt: "", alt: null }, budget));
-	}
-	await saveLog(ctx, log);
-	return resultBlocks(blocks, log, { type: "button", action_id: "media-scan", label: "Back to the media library", value: "" });
 }
 
 async function entryScan(ctx: PluginContext, settings: Settings, collection: string, cursor?: string): Promise<Block[]> {
@@ -315,7 +239,7 @@ async function activityWidget(ctx: PluginContext): Promise<Block[]> {
 			],
 		},
 		...(last
-			? [{ type: "context", text: `Latest: "${last.alt}" (${last.collection === "media" ? "media library" : last.collection}, ${last.locale}, ${last.at.slice(0, 10)})` }]
+			? [{ type: "context", text: `Latest: "${last.alt}" (${last.collection}, ${last.locale}, ${last.at.slice(0, 10)})` }]
 			: []),
 	];
 }

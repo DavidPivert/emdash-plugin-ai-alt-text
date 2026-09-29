@@ -9,7 +9,6 @@ export interface Settings {
 	mediaLanguage: string;
 	/** Where mediaLanguage comes from: the plugin setting, or the site language from EmDash settings. */
 	mediaLanguageFrom: "setting" | "site";
-	onUpload: boolean;
 	onSave: boolean;
 	siteUrl: string;
 	collections: string[];
@@ -31,7 +30,6 @@ export async function readSettings(ctx: PluginContext): Promise<Settings> {
 		model: resolveModel(values.get("model")),
 		mediaLanguage: text("mediaLanguage") || ctx.site.locale || "en",
 		mediaLanguageFrom: text("mediaLanguage") ? "setting" : "site",
-		onUpload: values.get("onUpload") !== false,
 		onSave: values.get("onSave") !== false,
 		siteUrl: (text("siteUrl") || ctx.site.url || "").replace(/\/+$/, ""),
 		collections: text("collections")

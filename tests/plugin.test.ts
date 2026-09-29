@@ -98,23 +98,6 @@ function sent(runtime: PluginRuntimeTestHost): SentRequest[] {
 
 const promptOf = (request: SentRequest) => request.body.messages[0]!.content[1]!.text ?? "";
 
-describe("media library", () => {
-	it("describes a new image on upload, in the site language, from its bytes", async () => {
-		const runtime = await setup();
-		await runtime.http.respond(API, claudeSays("Pochette de l’album Decimate, fond turquoise"));
-
-		const upload = await runtime.actions.media.upload({ filename: "decimate.jpg", contentType: "image/jpeg", base64: "/9j/4AAQSkZJRgABAQ==" });
-		if (!upload.success) throw new Error(upload.error.message);
-
-		expect((await mediaItem(runtime, upload.data.item.id)).alt).toBe("Pochette de l’album Decimate, fond turquoise");
-		const [request] = sent(runtime);
-		expect(request!.apiKey).toBe(API_KEY);
-		expect(request!.body.messages[0]!.content[0]!.source!.type).toBe("base64");
-		expect(promptOf(request!)).toContain("French");
-		expect(promptOf(request!)).toContain("decimate.jpg");
-	});
-});
-
 describe("entries in the media library language", () => {
 	it("inherit the media library alt text without calling Claude", async () => {
 		const runtime = await setup();
@@ -233,31 +216,15 @@ describe("safety", () => {
 });
 
 describe("admin", () => {
-	it("warns without a key and offers the media library and collections", async () => {
+	it("warns without a key and offers the collections", async () => {
 		const runtime = await setup({ model: "claude-haiku-4-5" });
 		const page = await runtime.admin.loadPage("/audit");
 		expect(page.blocks).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ type: "banner", title: "No Anthropic API key" }),
-				expect.objectContaining({ type: "section", accessory: expect.objectContaining({ action_id: "media-scan" }) }),
 				expect.objectContaining({ type: "actions", elements: [expect.objectContaining({ action_id: "scan", value: "albums|" })] }),
 			]),
 		);
-	});
-
-	it("lists media library images without alt text and describes them", async () => {
-		const runtime = await setup({ apiKey: API_KEY, onUpload: false });
-		const image = await libraryImage(runtime, "no-alt.jpg");
-		await libraryImage(runtime, "has-alt.jpg", "Déjà décrite");
-
-		const scan = await runtime.admin.act("/audit", "media-scan", { value: "" });
-		const table = scan.blocks.find((block) => block.type === "table") as unknown as { rows: Array<{ file: string; action: { value: unknown } }> };
-		expect(table.rows.map((row) => row.file)).toEqual(["no-alt.jpg"]);
-
-		await runtime.http.respond(API, claudeSays("Une image décrite"));
-		const done = await runtime.admin.act("/audit", "media-describe", { value: table.rows[0]!.action.value });
-		expect(done.blocks).toEqual(expect.arrayContaining([expect.objectContaining({ type: "fields", fields: [expect.objectContaining({ value: "Une image décrite" })] })]));
-		expect((await mediaItem(runtime, image.id)).alt).toBe("Une image décrite");
 	});
 
 	it("completes an entry in another language from the admin", async () => {

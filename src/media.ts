@@ -102,18 +102,6 @@ export function sameLanguage(a: string, b: string): boolean {
 	return primary(a) !== "" && primary(a) === primary(b);
 }
 
-/** Base64 without Node APIs; uses the native encoder when the runtime has one. */
-export function bytesToBase64(bytes: Uint8Array): string {
-	const native = (bytes as Uint8Array & { toBase64?: () => string }).toBase64;
-	if (typeof native === "function") return native.call(bytes);
-	let binary = "";
-	const chunk = 0x8000;
-	for (let i = 0; i < bytes.length; i += chunk) {
-		binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-	}
-	return btoa(binary);
-}
-
 /** Reads `field` or `field[2]` from entry data. */
 export function valueAtPath(data: Record<string, unknown>, path: string): MediaValue | undefined {
 	const match = /^([^[\]]+)(?:\[(\d+)\])?$/.exec(path);
