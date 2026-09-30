@@ -34,7 +34,7 @@ EmDash already copies the alt text of a media library image into every entry tha
 - **Saving an entry in another language with a new image** waits for Claude (a few seconds) so that the alt text is saved with the entry. Nothing else waits.
 - **New entries.** EmDash does not tell plugins the language of an entry before it exists, so the alt text of a new entry is written right after its first save. Like any plugin edit, it follows the collection's workflow: if the collection keeps drafts, it lands in the entry's draft and goes online when the entry is published.
 - **Not yet**: describing images on upload and from the media library itself. Both need to read the image file, which EmDash 1.0.1 does not allow sandboxed plugins to do on Cloudflare. Until then, an image gets its alt text the first time an entry using it is saved.
-- Alt text is one sentence of at most 125 characters. Claude never identifies people from their appearance: a name appears only when the alt text it translates already gives it.
+- Alt text is one sentence of at most 125 characters; a translation may be as long as the alt text it translates. Claude never identifies people from their appearance: a name appears only when the alt text it translates already gives it.
 - Top-level image fields and images inside top-level lists (galleries) are covered. Images embedded in rich text are not, yet.
 - Each request stays within the sandbox's limits (10 host calls, 30 seconds).
 - **If the site's `EMDASH_ENCRYPTION_KEY` changes**, the stored API key can no longer be read: the admin page says so, and nothing is written until you enter the key again. Saves are never blocked.

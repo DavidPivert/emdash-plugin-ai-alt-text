@@ -22,7 +22,7 @@ const SYSTEM_PROMPT = [
 	"You write alternative text (the HTML alt attribute) for images on a website, for people who use screen readers.",
 	"Write one short, factual sentence of about 100 characters, never more than 120.",
 	'Do not start with "Image of", "Photo of", "Picture of" or their equivalent in the requested language.',
-	"Never identify a person from their appearance; keep a name only when the alt text you are given already contains it.",
+	"Never identify a person from their appearance alone. When you are given existing alt text, keep every name it contains.",
 	"Reply with the alt text only, without quotes.",
 ].join(" ");
 
@@ -51,6 +51,16 @@ export interface AltRequest {
 	field?: string;
 }
 
+/**
+ * Longest alt text accepted. A translation may be as long as the text it
+ * translates, with room for the target language: a person chose that length,
+ * and cutting it loses what they wrote.
+ */
+export function lengthLimit(input: Pick<AltRequest, "reference">): number {
+	const source = input.reference ? Array.from(input.reference.text.trim()).length : 0;
+	return Math.max(MAX_ALT_LENGTH, Math.ceil(source * 1.15));
+}
+
 export function languageName(locale: string): string {
 	const tag = locale.trim() || "en";
 	try {
@@ -69,8 +79,10 @@ export function buildRequest(input: AltRequest): { headers: Record<string, strin
 	const language = languageName(input.locale);
 	const task = input.reference
 		? `Translate this alt text from ${languageName(input.reference.locale)} into ${language}: <alt>${input.reference.text.slice(0, 500)}</alt>` +
-			" Keep its meaning, the names it gives and its length. Check it against the image: correct only what is clearly wrong," +
-			` and add nothing it does not say.${context}`
+			" Keep every name it gives, people included: whoever wrote it knows who and what is pictured." +
+			" Keep its meaning, who does what and whose things are whose; add no detail it does not give." +
+			" Check it against the image only to correct something clearly wrong." +
+			` Stay under ${lengthLimit(input)} characters: if the translation would be longer, condense the wording rather than dropping details.${context}`
 		: `Write the alt text for this image in ${language}.${context}`;
 	const body: Record<string, unknown> = {
 		model: input.model,
@@ -104,15 +116,15 @@ export function buildRequest(input: AltRequest): { headers: Record<string, strin
 const DANGLING =
 	/[\s,;:–—-]+(and|or|with|of|the|a|an|in|on|at|to|for|by|from|et|ou|avec|de|du|des|la|le|les|un|une|à|au|aux|en|sur|dans|pour|par|y|con|del|el|und|mit|der|die|das)$/i;
 
-export function cleanAlt(raw: string): string {
+export function cleanAlt(raw: string, maxLength = MAX_ALT_LENGTH): string {
 	let alt = raw.trim().replace(/\s+/g, " ");
 	alt = alt.replace(/^(alt(\s*text)?\s*:\s*)/i, "").trim();
 	alt = alt.replace(/^["'«»“”‘’\s]+|["'«»“”‘’\s]+$/g, "").trim();
-	if (Array.from(alt).length > MAX_ALT_LENGTH) {
-		const cut = Array.from(alt).slice(0, MAX_ALT_LENGTH).join("");
+	if (Array.from(alt).length > maxLength) {
+		const cut = Array.from(alt).slice(0, maxLength).join("");
 		// Prefer ending on a clause (comma, semicolon, dash) over a dangling word.
 		const clause = Math.max(cut.lastIndexOf(", "), cut.lastIndexOf("; "), cut.lastIndexOf(" – "), cut.lastIndexOf(" — "));
-		alt = clause >= MAX_ALT_LENGTH * 0.5 ? cut.slice(0, clause) : cut.replace(/\s+\S*$/, "");
+		alt = clause >= maxLength * 0.5 ? cut.slice(0, clause) : cut.replace(/\s+\S*$/, "");
 		// Never end on a dangling linking word ("…cables and", "…câbles et").
 		for (let i = 0; i < 3 && DANGLING.test(alt); i++) alt = alt.replace(DANGLING, "");
 		alt = alt.replace(/[\s,;:–—-]+$/, "").trim();
@@ -130,7 +142,7 @@ interface MessagesResponse {
 	error?: { type?: string; message?: string };
 }
 
-export function parseResponse(status: number, payload: unknown): AltResult {
+export function parseResponse(status: number, payload: unknown, maxLength = MAX_ALT_LENGTH): AltResult {
 	const data = (payload ?? {}) as MessagesResponse;
 	if (status >= 400) {
 		const type = data.error?.type ?? "http_error";
@@ -143,7 +155,7 @@ export function parseResponse(status: number, payload: unknown): AltResult {
 		.filter((block) => block.type === "text" && typeof block.text === "string")
 		.map((block) => block.text)
 		.join(" ");
-	const alt = cleanAlt(text);
+	const alt = cleanAlt(text, maxLength);
 	return alt ? { ok: true, alt } : { ok: false, reason: "empty", message: "Claude returned no text" };
 }
 
@@ -164,5 +176,5 @@ export async function requestAlt(http: HttpFetcher, apiKey: string, input: AltRe
 	} catch {
 		payload = null;
 	}
-	return parseResponse(response.status, payload);
+	return parseResponse(response.status, payload, lengthLimit(input));
 }

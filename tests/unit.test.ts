@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildRequest, cleanAlt, languageName, parseResponse, resolveModel } from "../src/claude";
+import { buildRequest, cleanAlt, languageName, lengthLimit, parseResponse, resolveModel } from "../src/claude";
 import { decide, referenceFor } from "../src/entries";
 import { findMediaFields, isPrivateUrl, isSupportedImage, publicImageUrl, sameLanguage, valueAtPath } from "../src/media";
 import { NON_SECRET_SETTING_PREFIXES } from "../src/settings";
@@ -73,8 +73,21 @@ describe("Claude request", () => {
 		const text = (body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]!.content[1]!.text as string;
 		expect(text).toContain("Translate this alt text from French (fr) into English (en)");
 		expect(text).toContain("<alt>Pochette du single Decimate : portrait de Maeta</alt>");
-		expect(text).toContain("Check it against the image");
-		expect(body.system).toContain("keep a name only when the alt text you are given already contains it");
+		expect(text).toContain("Keep every name it gives, people included");
+		expect(text).toContain("Check it against the image only to correct something clearly wrong");
+		expect(text).toContain("Stay under 125 characters");
+		expect(body.system).toContain("Never identify a person from their appearance alone");
+	});
+
+	it("lets a translation be as long as the text it translates", () => {
+		const long = "Maeta face à son hôte sur les fauteuils blancs du plateau du Joe Budden Network, micros en place, baie vitrée donnant sur la skyline";
+		expect(lengthLimit({})).toBe(125);
+		expect(lengthLimit({ reference: { text: "Un chat", locale: "fr" } })).toBe(125);
+		expect(lengthLimit({ reference: { text: long, locale: "fr" } })).toBe(152);
+		const { body } = buildRequest({ ...base, locale: "en", model: "claude-haiku-4-5", reference: { text: long, locale: "fr" } });
+		expect((body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]!.content[1]!.text).toContain("Stay under 152 characters");
+		const english = "Maeta facing her host on the white armchairs of the Joe Budden Network set, microphones in place, bay window overlooking the skyline";
+		expect(parseResponse(200, { stop_reason: "end_turn", content: [{ type: "text", text: english }] }, 152)).toEqual({ ok: true, alt: english });
 	});
 
 	it("gives thinking models room, low effort and refusal fallbacks", () => {
