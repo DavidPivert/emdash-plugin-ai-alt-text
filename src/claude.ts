@@ -3,8 +3,10 @@
  *
  * Sandboxed plugins reach the network only through `ctx.http.fetch`, which is
  * why this calls the HTTP API directly instead of using `@anthropic-ai/sdk`.
- * Images are passed by public URL: Anthropic downloads them, so nothing heavy
- * runs in the sandbox (50 ms of CPU per invocation on Cloudflare).
+ * Images used in entries are passed by public URL: Anthropic downloads them,
+ * so nothing heavy runs in the sandbox (50 ms of CPU per invocation on
+ * Cloudflare). Media library items have no public URL for plugins, so their
+ * bytes are sent instead, with a size cap.
  */
 
 export const API_URL = "https://api.anthropic.com/v1/messages";
@@ -26,7 +28,9 @@ const SYSTEM_PROMPT = [
 	"Reply with the alt text only, without quotes.",
 ].join(" ");
 
-export type ImageSource = { type: "url"; url: string };
+export type ImageSource =
+	| { type: "url"; url: string }
+	| { type: "base64"; media_type: string; data: string };
 
 /** Alt text the site already has for this image, in another language. */
 export interface Reference {
@@ -49,6 +53,8 @@ export interface AltRequest {
 	/** Optional context: the entry title and the field holding the image. */
 	entryTitle?: string;
 	field?: string;
+	/** Optional context for a media library item: its file name. */
+	filename?: string;
 }
 
 /**
@@ -73,9 +79,12 @@ export function languageName(locale: string): string {
 }
 
 export function buildRequest(input: AltRequest): { headers: Record<string, string>; body: Record<string, unknown> } {
-	const context = input.entryTitle
-		? ` It illustrates the entry "${input.entryTitle.slice(0, 200)}"${input.field ? ` (field "${input.field}")` : ""}.`
-		: "";
+	let context = "";
+	if (input.entryTitle) {
+		context = ` It illustrates the entry "${input.entryTitle.slice(0, 200)}"${input.field ? ` (field "${input.field}")` : ""}.`;
+	} else if (input.filename) {
+		context = ` The file is named "${input.filename.slice(0, 120)}", which may help but can be wrong.`;
+	}
 	const language = languageName(input.locale);
 	const task = input.reference
 		? `Translate this alt text from ${languageName(input.reference.locale)} into ${language}: <alt>${input.reference.text.slice(0, 500)}</alt>` +
