@@ -2,6 +2,7 @@ import type { SandboxedPlugin } from "emdash/plugin";
 
 import { entryTitle, handleAdmin } from "./admin";
 import { processEntry } from "./entries";
+import { describeMediaItem, needsAlt } from "./library";
 import { saveLog } from "./log";
 import { Budget, coversCollection, HOST_CALLS_PER_INVOCATION, readSettings } from "./settings";
 
@@ -9,14 +10,15 @@ import { Budget, coversCollection, HOST_CALLS_PER_INVOCATION, readSettings } fro
  * AI Alt Text — alt text for images, written by Claude.
  *
  * EmDash copies the media library's alt text into every image field left
- * without one, so the media library is where most alt text belongs. Saving an
- * entry fills what is still missing: an image with no alt text anywhere is
- * described (media library + field), and an entry in another language gets
- * alt text in its own language instead of the inherited one. The admin page
- * catches up on existing entries.
+ * without one, so the media library is where most alt text belongs:
+ * - `media:afterUpload` describes new images in the media library language.
+ * - Saving an entry fills what is still missing: an image with no alt text
+ *   anywhere is described (media library + field), and an entry in another
+ *   language gets alt text in its own language instead of the inherited one.
+ * - The admin page catches up on existing images and entries.
  *
  * A failure (no key, API error, timeout) only skips the alt text: these hooks
- * never block a save. Every invocation stays within 10 host calls.
+ * never block an upload or a save. Every invocation stays within 10 host calls.
  */
 const HOOK_OPTIONS = {
 	// Vision calls take a few seconds; the default 5 s would cut them off.
@@ -27,6 +29,21 @@ const HOOK_OPTIONS = {
 
 const plugin: SandboxedPlugin = {
 	hooks: {
+		"media:afterUpload": {
+			...HOOK_OPTIONS,
+			handler: async (event, ctx) => {
+				if (!needsAlt(event.media)) return; // PDF, video, SVG…: before any host call
+				const settings = await readSettings(ctx);
+				if (!settings.onUpload || !settings.apiKey || !ctx.media) return;
+
+				// settings (2) + media read (1) + log (1) reserved.
+				const budget = new Budget(HOST_CALLS_PER_INVOCATION - 4);
+				// The event carries no alt text, and uploads through the API or MCP may come with one.
+				const item = await ctx.media.get(event.media.id);
+				if (!item || !needsAlt(item)) return;
+				await saveLog(ctx, [await describeMediaItem(ctx, settings, item, budget, { recheck: true })]);
+			},
+		},
 		"content:beforeSave": {
 			...HOOK_OPTIONS,
 			handler: async (event, ctx) => {

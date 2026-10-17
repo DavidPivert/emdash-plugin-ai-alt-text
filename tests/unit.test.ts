@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import type { PluginContext } from "emdash/plugin";
+
 import { buildRequest, cleanAlt, languageName, lengthLimit, parseResponse, resolveModel } from "../src/claude";
 import { decide, referenceFor } from "../src/entries";
-import { findMediaFields, isPrivateUrl, isSupportedImage, publicImageUrl, sameLanguage, valueAtPath } from "../src/media";
-import { NON_SECRET_SETTING_PREFIXES } from "../src/settings";
+import { describeMediaItem, type LibraryItem, MAX_MEDIA_BYTES, needsAlt } from "../src/library";
+import { bytesToBase64, findMediaFields, isPrivateUrl, isSupportedImage, publicImageUrl, sameLanguage, valueAtPath } from "../src/media";
+import { Budget, NON_SECRET_SETTING_PREFIXES, type Settings } from "../src/settings";
 import manifest from "../emdash-plugin.jsonc?raw";
 
 describe("media helpers", () => {
@@ -40,6 +43,15 @@ describe("media helpers", () => {
 		expect(isSupportedImage({ id: "1", src: "/media/file/abc" })).toBe(true);
 	});
 
+	it("encodes bytes in base64, with or without the native encoder", () => {
+		const bytes = new Uint8Array(0x8000 * 2 + 7).map((_, index) => (index * 31) % 256);
+		let binary = "";
+		for (const byte of bytes) binary += String.fromCharCode(byte);
+		expect(bytesToBase64(bytes)).toBe(btoa(binary));
+		Object.defineProperty(bytes, "toBase64", { value: undefined });
+		expect(bytesToBase64(bytes)).toBe(btoa(binary));
+	});
+
 	it("treats local development hosts as unreachable", () => {
 		expect(isPrivateUrl("http://localhost:4321/a.png")).toBe(true);
 		expect(isPrivateUrl("https://site.test/a.png")).toBe(true);
@@ -61,6 +73,18 @@ describe("Claude request", () => {
 		expect(content[0]).toEqual({ type: "image", source: { type: "url", url: "https://example.com/a.jpg" } });
 		expect(content[1]!.text).toContain("French (fr)");
 		expect(content[1]!.text).toContain('"Decimate"');
+	});
+
+	it("sends media library images as bytes, with their file name as a hint", () => {
+		const { body } = buildRequest({
+			model: "claude-haiku-4-5",
+			image: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+			locale: "fr",
+			filename: "decimate-cover.png",
+		});
+		const content = (body.messages as Array<{ content: Array<Record<string, unknown>> }>)[0]!.content;
+		expect(content[0]).toEqual({ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } });
+		expect(content[1]!.text).toContain('The file is named "decimate-cover.png", which may help but can be wrong.');
 	});
 
 	it("translates existing alt text when given one, checking it against the image", () => {
@@ -230,5 +254,94 @@ describe("settings fallback", () => {
 		for (const key of keys) {
 			expect(NON_SECRET_SETTING_PREFIXES.some((prefix) => key.startsWith(prefix)), key).toBe(key !== "apiKey");
 		}
+	});
+});
+
+describe("describeMediaItem", () => {
+	const settings: Settings = {
+		apiKey: "sk-ant-test",
+		apiKeyUnreadable: false,
+		model: "claude-haiku-4-5",
+		mediaLanguage: "fr",
+		mediaLanguageFrom: "setting",
+		onUpload: true,
+		onSave: true,
+		siteUrl: "https://example.com",
+		collections: [],
+	};
+	const item: LibraryItem = { id: "m1", filename: "cover.jpg", mimeType: "image/jpeg", size: 14, alt: null };
+
+	/** Just what describeMediaItem uses, with every call recorded. */
+	function fakeContext(options: { readBytes?: () => Promise<unknown>; altAfterwards?: string | null; claude?: string } = {}) {
+		const calls: string[] = [];
+		const ctx = {
+			media: {
+				get: async () => {
+					calls.push("get");
+					return { ...item, alt: options.altAfterwards ?? null };
+				},
+				readBytes: async () => {
+					calls.push("readBytes");
+					return (options.readBytes ?? (async () => ({ bytes: new Uint8Array([1, 2, 3]), mimeType: "image/jpeg" })))();
+				},
+				updateMetadata: async (_id: string, patch: { alt: string }) => {
+					calls.push(`update:${patch.alt}`);
+					return item;
+				},
+			},
+			http: {
+				fetch: async (_url: string, init?: RequestInit) => {
+					calls.push(`claude:${JSON.parse(String(init?.body)).messages[0].content[0].source.data}`);
+					return new Response(JSON.stringify({ stop_reason: "end_turn", content: [{ type: "text", text: options.claude ?? "Une pochette" }] }));
+				},
+			},
+		};
+		return { ctx: ctx as unknown as PluginContext, calls };
+	}
+
+	it("reads the bytes, asks Claude and saves the alt text in three host calls", async () => {
+		const { ctx, calls } = fakeContext();
+		const budget = new Budget(3);
+		expect(await describeMediaItem(ctx, settings, item, budget)).toMatchObject({ status: "generated", alt: "Une pochette", target: "media", locale: "fr" });
+		expect(calls).toEqual(["readBytes", "claude:AQID", "update:Une pochette"]);
+		expect(budget.left).toBe(0);
+	});
+
+	it("keeps alt text a person added while Claude was writing", async () => {
+		const { ctx, calls } = fakeContext({ altAfterwards: "Écrite pendant ce temps" });
+		const entry = await describeMediaItem(ctx, settings, item, new Budget(4), { recheck: true });
+		expect(entry).toMatchObject({ status: "skipped", alt: "Écrite pendant ce temps" });
+		expect(calls.some((call) => call.startsWith("update:"))).toBe(false);
+	});
+
+	it("checks again before saving only when asked, and within the budget", async () => {
+		const { ctx, calls } = fakeContext();
+		expect(await describeMediaItem(ctx, settings, item, new Budget(3), { recheck: true })).toMatchObject({ status: "skipped", message: "No budget left in this request" });
+		expect(calls).toEqual([]);
+		expect(await describeMediaItem(ctx, settings, item, new Budget(4), { recheck: true })).toMatchObject({ status: "generated" });
+		expect(calls).toEqual(["readBytes", "claude:AQID", "get", "update:Une pochette"]);
+	});
+
+	it("says what to update when EmDash cannot read media files on Cloudflare", async () => {
+		const { ctx } = fakeContext({ readBytes: async () => Promise.reject(new Error("Media storage is not configured")) });
+		expect(await describeMediaItem(ctx, settings, item, new Budget(3))).toMatchObject({
+			status: "error",
+			message: expect.stringContaining("@emdash-cms/cloudflare to 1.3.0"),
+		});
+	});
+
+	it("leaves images too large for the sandbox to the entries that use them", async () => {
+		const { ctx, calls } = fakeContext({ readBytes: async () => Promise.reject(new RangeError("Media exceeds the requested 3145728-byte limit")) });
+		expect(await describeMediaItem(ctx, settings, { ...item, size: null }, new Budget(3))).toMatchObject({ status: "skipped", message: expect.stringContaining("Too large") });
+		expect(await describeMediaItem(ctx, settings, { ...item, size: MAX_MEDIA_BYTES + 1 }, new Budget(3))).toMatchObject({ status: "skipped" });
+		expect(calls).toEqual(["readBytes"]);
+	});
+
+	it("only describes supported images without alt text", () => {
+		expect(needsAlt(item)).toBe(true);
+		expect(needsAlt({ ...item, alt: "  " })).toBe(true);
+		expect(needsAlt({ ...item, alt: "Une pochette" })).toBe(false);
+		expect(needsAlt({ ...item, mimeType: "image/svg+xml" })).toBe(false);
+		expect(needsAlt({ ...item, mimeType: "application/pdf" })).toBe(false);
 	});
 });

@@ -11,6 +11,7 @@ export interface Settings {
 	mediaLanguage: string;
 	/** Where mediaLanguage comes from: the plugin setting, or the site language from EmDash settings. */
 	mediaLanguageFrom: "setting" | "site";
+	onUpload: boolean;
 	onSave: boolean;
 	siteUrl: string;
 	collections: string[];
@@ -33,6 +34,7 @@ export async function readSettings(ctx: PluginContext): Promise<Settings> {
 		model: resolveModel(values.get("model")),
 		mediaLanguage: text("mediaLanguage") || ctx.site.locale || "en",
 		mediaLanguageFrom: text("mediaLanguage") ? "setting" : "site",
+		onUpload: values.get("onUpload") !== false,
 		onSave: values.get("onSave") !== false,
 		siteUrl: (text("siteUrl") || ctx.site.url || "").replace(/\/+$/, ""),
 		collections: text("collections")
@@ -43,8 +45,8 @@ export async function readSettings(ctx: PluginContext): Promise<Settings> {
 }
 
 /**
- * First letters of every setting except `apiKey` (model, mediaLanguage, onSave,
- * collections, siteUrl). Keep in sync with `settingsSchema` in the manifest.
+ * First letters of every setting except `apiKey` (model, mediaLanguage, onUpload,
+ * onSave, collections, siteUrl). Keep in sync with `settingsSchema` in the manifest.
  */
 export const NON_SECRET_SETTING_PREFIXES = ["m", "o", "c", "s"] as const;
 

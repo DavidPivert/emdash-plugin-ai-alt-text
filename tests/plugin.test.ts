@@ -16,9 +16,10 @@ afterEach(async () => {
 });
 
 type ImageValue = { id?: string; alt?: string; provider?: string; meta?: { storageKey?: string } };
+type ImageSource = { type: string; url?: string; media_type?: string; data?: string };
 type SentRequest = {
 	apiKey: string | undefined;
-	body: { model: string; messages: Array<{ content: Array<{ type: string; text?: string; source?: { type: string; url?: string } }> }> };
+	body: { model: string; messages: Array<{ content: Array<{ type: string; text?: string; source?: ImageSource }> }> };
 };
 
 function claudeSays(text: string, status = 200): Response {
@@ -97,6 +98,27 @@ function sent(runtime: PluginRuntimeTestHost): SentRequest[] {
 }
 
 const promptOf = (request: SentRequest) => request.body.messages[0]!.content[1]!.text ?? "";
+const sourceOf = (request: SentRequest) => request.body.messages[0]!.content[0]!.source;
+
+/** A distinct JPEG for each call, so EmDash does not deduplicate uploads. */
+function jpeg(variant = 0): Uint8Array {
+	const bytes = JPEG.slice();
+	bytes[5] = variant;
+	return bytes;
+}
+
+const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
+
+async function upload(runtime: PluginRuntimeTestHost, filename: string, extra: { alt?: string; variant?: number; contentType?: string; bytes?: Uint8Array } = {}) {
+	const result = await runtime.actions.media.upload({
+		filename,
+		base64: base64(extra.bytes ?? jpeg(extra.variant)),
+		contentType: extra.contentType ?? "image/jpeg",
+		...(extra.alt ? { alt: extra.alt } : {}),
+	});
+	if (!result.success) throw new Error(result.error.message);
+	return result.data.item.id;
+}
 
 describe("entries in the media library language", () => {
 	it("inherit the media library alt text without calling Claude", async () => {
@@ -140,6 +162,75 @@ describe("entries in the media library language", () => {
 
 		expect((await published(runtime, item.id)).cover?.alt).toBe("Nouvelle pochette");
 		expect((await mediaItem(runtime, image.id)).alt).toBe("Nouvelle pochette");
+	});
+});
+
+describe("new images", () => {
+	it("are described on upload, in the media library language, from their bytes", async () => {
+		const runtime = await setup();
+		await runtime.http.respond(API, claudeSays("Pochette de Decimate, portrait sur fond turquoise"));
+
+		const id = await upload(runtime, "decimate-cover.jpg");
+		await settle(runtime, 1);
+
+		expect((await mediaItem(runtime, id)).alt).toBe("Pochette de Decimate, portrait sur fond turquoise");
+		const [request] = sent(runtime);
+		expect(sourceOf(request!)).toEqual({ type: "base64", media_type: "image/jpeg", data: base64(jpeg()) });
+		expect(promptOf(request!)).toContain("Write the alt text for this image in French (fr)");
+		expect(promptOf(request!)).toContain('The file is named "decimate-cover.jpg"');
+		const [entry] = await runtime.inspect.storage.list("alt_log");
+		expect(entry!.data).toMatchObject({ collection: "media", contentId: id, status: "generated", target: "media", locale: "fr" });
+		expect((await runtime.admin.loadWidget("activity")).blocks).toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "context", text: expect.stringContaining("(media library, fr,") })]),
+		);
+	});
+
+	it("keep the alt text given with the upload", async () => {
+		const runtime = await setup();
+
+		const id = await upload(runtime, "decimate.jpg", { alt: "Pochette écrite à la main" });
+		await settle(runtime);
+
+		expect(runtime.http.requests()).toEqual([]);
+		expect((await mediaItem(runtime, id)).alt).toBe("Pochette écrite à la main");
+	});
+
+	it("are left alone when description on upload is off", async () => {
+		const runtime = await setup({ apiKey: API_KEY, onUpload: false });
+
+		const id = await upload(runtime, "decimate.jpg");
+		await settle(runtime);
+
+		expect(runtime.http.requests()).toEqual([]);
+		expect((await mediaItem(runtime, id)).alt ?? null).toBeNull();
+		const page = await runtime.admin.loadPage("/audit");
+		expect(page.blocks).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "fields", fields: expect.arrayContaining([{ label: "New images", value: "Off" }]) }),
+			]),
+		);
+	});
+
+	it("are uploaded anyway when Claude fails", async () => {
+		const runtime = await setup();
+		await runtime.http.respond(API, claudeSays("Overloaded", 529));
+
+		const id = await upload(runtime, "decimate.jpg");
+		await settle(runtime, 1);
+
+		expect((await mediaItem(runtime, id)).alt ?? null).toBeNull();
+		const [entry] = await runtime.inspect.storage.list("alt_log");
+		expect(entry!.data).toMatchObject({ status: "error", message: expect.stringContaining("529") });
+	});
+
+	it("are not read when Claude cannot take their format", async () => {
+		const runtime = await setup();
+
+		await upload(runtime, "booklet.pdf", { contentType: "application/pdf", bytes: new TextEncoder().encode("%PDF-1.4 test") });
+		await settle(runtime);
+
+		expect(runtime.http.requests()).toEqual([]);
+		expect(await logCount(runtime)).toBe(0);
 	});
 });
 
@@ -252,12 +343,13 @@ describe("safety", () => {
 });
 
 describe("admin", () => {
-	it("warns without a key and offers the collections", async () => {
+	it("warns without a key and offers the media library and the collections", async () => {
 		const runtime = await setup({ model: "claude-haiku-4-5" });
 		const page = await runtime.admin.loadPage("/audit");
 		expect(page.blocks).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ type: "banner", title: "No Anthropic API key" }),
+				expect.objectContaining({ type: "section", accessory: expect.objectContaining({ action_id: "media-scan" }) }),
 				expect.objectContaining({ type: "actions", elements: [expect.objectContaining({ action_id: "scan", value: "albums|" })] }),
 			]),
 		);
@@ -279,6 +371,65 @@ describe("admin", () => {
 		await runtime.http.respond(API, claudeSays("Decimate cover"));
 		await runtime.admin.act("/audit", "complete", { value: table.rows[0]!.action.value });
 		expect((await published(runtime, item.id)).cover?.alt).toBe("Decimate cover");
+	});
+
+	it("finds media library images without alt text and describes them two at a time", async () => {
+		const runtime = await setup();
+		const images = [];
+		for (const [index, name] of ["one.jpg", "two.jpg", "three.jpg"].entries()) {
+			images.push((await runtime.fixtures.media({ filename: name, mimeType: "image/jpeg", bytes: jpeg(index) })).id);
+		}
+		await runtime.fixtures.media({ filename: "done.jpg", mimeType: "image/jpeg", bytes: jpeg(9), alt: "Déjà décrite" });
+
+		const scan = await runtime.admin.act("/audit", "media-scan", { value: "" });
+		const rows = (blocks: Array<{ type: string }>) =>
+			(blocks.find((block) => block.type === "table") as unknown as { rows: Array<{ file: string }> }).rows.map((row) => row.file);
+		expect(rows(scan.blocks).sort()).toEqual(["one.jpg", "three.jpg", "two.jpg"]);
+		expect(scan.blocks).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "actions", elements: [expect.objectContaining({ action_id: "media-describe", label: "Describe the next 2" })] }),
+			]),
+		);
+
+		await runtime.http.respond(API, claudeSays("Première image"));
+		await runtime.http.respond(API, claudeSays("Deuxième image"));
+		const described = await runtime.admin.act("/audit", "media-describe", { value: "|" });
+
+		expect(runtime.http.requests()).toHaveLength(2);
+		const alts = await Promise.all(images.map(async (id) => (await mediaItem(runtime, id)).alt ?? null));
+		expect(alts.filter(Boolean).sort()).toEqual(["Deuxième image", "Première image"]);
+		expect(rows(described.blocks)).toHaveLength(1);
+		expect(described.blocks).toEqual(expect.arrayContaining([expect.objectContaining({ type: "section", text: "2 alt text(s) written." })]));
+		expect(described.toast).toMatchObject({ type: "success" });
+	});
+
+	it("describes one media library image from its row, and leaves images that got alt text since", async () => {
+		const runtime = await setup();
+		const { id } = await runtime.fixtures.media({ filename: "one.jpg", mimeType: "image/jpeg", bytes: jpeg(1) });
+		await runtime.http.respond(API, claudeSays("Une image"));
+
+		await runtime.admin.act("/audit", "media-describe", { value: `|${id}` });
+		expect((await mediaItem(runtime, id)).alt).toBe("Une image");
+
+		const again = await runtime.admin.act("/audit", "media-describe", { value: `|${id}` });
+		expect(runtime.http.requests()).toHaveLength(1);
+		expect(again.blocks).toEqual(expect.arrayContaining([expect.objectContaining({ type: "context", text: "This image already has alt text." })]));
+	});
+
+	it("leaves media library images too large for the sandbox to the entries that use them", async () => {
+		const runtime = await setup();
+		const big = new Uint8Array(3 * 1024 * 1024 + 1);
+		big.set(JPEG.subarray(0, 4));
+		const { id } = await runtime.fixtures.media({ filename: "poster.jpg", mimeType: "image/jpeg", bytes: big });
+
+		const scan = await runtime.admin.act("/audit", "media-scan", { value: "" });
+		expect(scan.blocks.some((block) => block.type === "actions")).toBe(false);
+		const described = await runtime.admin.act("/audit", "media-describe", { value: `|${id}` });
+
+		expect(runtime.http.requests()).toEqual([]);
+		expect(described.blocks).toEqual(
+			expect.arrayContaining([expect.objectContaining({ type: "context", text: expect.stringContaining("Too large to read in the sandbox") })]),
+		);
 	});
 
 	it("shows recent activity in the dashboard widget", async () => {
